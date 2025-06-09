@@ -1,0 +1,35 @@
+// Lore-accurate One Piece channel names
+const onePieceChannels = [
+    '⚓ Going Merry',
+    '🦁 Thousand Sunny',
+    '🏴‍☠️ Moby Dick',
+    '💀 Queen Mama Chanter',
+    '🌊 Red Force',
+    '⚔️ Oro Jackson',
+    '🏝️ Laugh Tale',
+    '🌺 Amazon Lily',
+    '🐘 Zou',
+    '🍰 Whole Cake Island',
+    '🌸 Wano Country',
+    '🏛️ Alabasta Palace',
+    '🌊 Water 7',
+    '⚙️ Enies Lobby',
+    '🌋 Marineford',
+    '🏴‍☠️ Impel Down',
+    '🐠 Fish-Man Island',
+    '☁️ Skypeia',
+    '🏜️ Drum Island',
+    '🌴 Thriller Bark',
+    '🦴 Little Garden',
+    '🌪️ Whisky Peak',
+    '🗡️ Shimotsuki Village',
+    '🍊 Cocoyasi Village',
+    '🎪 Orange Town',
+    '🌊 Loguetown',
+    '🏔️ Reverse Mountain',
+    '🐋 Laboon\'s Lighthouse',
+    '🌊 Sabaody Archipelago',
+    '🌸 Dressrosa'
+];
+
+module.exports = { onePieceChannels };
