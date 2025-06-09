@@ -14,7 +14,7 @@ class DynamicVoiceBot {
         this.createdChannels = new Set();
         this.deleteTimers = new Map();
         this.usedChannelNames = new Set();
-        this.audioConnections = new Map(); // Track voice connections
+        this.audioConnections = new Map();
         
         this.setupEventListeners();
     }
@@ -66,7 +66,7 @@ class DynamicVoiceBot {
                 createChannel = await guild.channels.create({
                     name: config.createChannelName,
                     type: ChannelType.GuildVoice,
-                    parent: communityCategory?.id, // Place in Community category if found
+                    parent: communityCategory?.id,
                     permissionOverwrites: [
                         {
                             id: guild.roles.everyone.id,
@@ -215,6 +215,8 @@ class DynamicVoiceBot {
             console.log(`⚠️ Could not join voice channel: ${error.message}`);
         }
     }
+
+    async createNewVoiceChannel(member, guild) {
         try {
             console.log(`🚧 Creating new pirate crew for ${member.user.tag}...`);
             
@@ -237,7 +239,7 @@ class DynamicVoiceBot {
                 newChannel = await guild.channels.create({
                     name: channelName,
                     type: ChannelType.GuildVoice,
-                    parent: communityCategory?.id, // Try Community category first
+                    parent: communityCategory?.id,
                     permissionOverwrites: [
                         {
                             id: guild.roles.everyone.id,
@@ -261,7 +263,6 @@ class DynamicVoiceBot {
                 newChannel = await guild.channels.create({
                     name: channelName,
                     type: ChannelType.GuildVoice,
-                    // No parent category
                     permissionOverwrites: [
                         {
                             id: guild.roles.everyone.id,
