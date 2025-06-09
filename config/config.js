@@ -5,6 +5,6 @@ module.exports = {
     clientId: process.env.CLIENT_ID,
     createChannelName: process.env.CREATE_CHANNEL_NAME || '🏴 Set Sail Together',
     categoryName: process.env.CATEGORY_NAME || '🌊 Grand Line Voice Channels',
-    deleteDelay: parseInt(process.env.DELETE_DELAY) || 5000,
+    deleteDelay: parseInt(process.env.DELETE_DELAY) || 1000, // 1 second instead of 5
     debug: process.env.DEBUG === 'true'
 };
