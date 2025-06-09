@@ -44,6 +44,17 @@ class DynamicVoiceBot {
         try {
             console.log(`🏗️ Setting up guild: ${guild.name}`);
             
+            // Find the Community category
+            const communityCategory = guild.channels.cache.find(
+                c => c.name === '✦✗✦ Community ✦✗✦' && c.type === ChannelType.GuildCategory
+            );
+            
+            if (!communityCategory) {
+                console.log(`⚠️ Could not find "✦✗✦ Community ✦✗✦" category`);
+            } else {
+                console.log(`📁 Found Community category: ${communityCategory.name}`);
+            }
+            
             // Check if join channel already exists
             let createChannel = guild.channels.cache.find(
                 c => c.name === config.createChannelName && c.type === ChannelType.GuildVoice
@@ -54,6 +65,7 @@ class DynamicVoiceBot {
                 createChannel = await guild.channels.create({
                     name: config.createChannelName,
                     type: ChannelType.GuildVoice,
+                    parent: communityCategory?.id, // Place in Community category if found
                     permissionOverwrites: [
                         {
                             id: guild.roles.everyone.id,
@@ -61,7 +73,7 @@ class DynamicVoiceBot {
                         }
                     ]
                 });
-                console.log(`⚓ Created new join channel: ${config.createChannelName}`);
+                console.log(`⚓ Created new join channel in Community category: ${config.createChannelName}`);
             } else {
                 console.log(`⚓ Using existing join channel: ${config.createChannelName}`);
             }
@@ -132,15 +144,15 @@ class DynamicVoiceBot {
             const channelName = this.getRandomChannelName();
             console.log(`🎯 Selected destination: ${channelName}`);
             
-            // Find the join channel to position the new channel right below it
-            const joinChannel = guild.channels.cache.find(
-                c => c.name === config.createChannelName && c.type === ChannelType.GuildVoice
+            // Find the Community category for proper placement
+            const communityCategory = guild.channels.cache.find(
+                c => c.name === '✦✗✦ Community ✦✗✦' && c.type === ChannelType.GuildCategory
             );
             
             const newChannel = await guild.channels.create({
                 name: channelName,
                 type: ChannelType.GuildVoice,
-                position: joinChannel ? joinChannel.position + 1 : undefined,
+                parent: communityCategory?.id, // Place in Community category
                 permissionOverwrites: [
                     {
                         id: guild.roles.everyone.id,
@@ -164,6 +176,7 @@ class DynamicVoiceBot {
             await member.voice.setChannel(newChannel);
 
             console.log(`🏴‍☠️ NEW PIRATE CREW FORMED: ${channelName} - Captain ${member.user.tag}! ⚓`);
+            console.log(`📁 Crew stationed in Community category`);
 
         } catch (error) {
             console.error(`❌ Failed to create pirate crew for ${member.user.tag}:`, error);
