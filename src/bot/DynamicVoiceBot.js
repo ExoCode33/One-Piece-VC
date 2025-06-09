@@ -44,29 +44,16 @@ class DynamicVoiceBot {
         try {
             console.log(`🏗️ Setting up guild: ${guild.name}`);
             
-            let category = guild.channels.cache.find(
-                c => c.name === config.categoryName && c.type === ChannelType.GuildCategory
-            );
-
-            if (!category) {
-                category = await guild.channels.create({
-                    name: config.categoryName,
-                    type: ChannelType.GuildCategory,
-                });
-                console.log(`📁 Created category: ${config.categoryName} 🏴‍☠️`);
-            } else {
-                console.log(`📁 Found existing category: ${config.categoryName}`);
-            }
-
+            // Check if join channel already exists
             let createChannel = guild.channels.cache.find(
                 c => c.name === config.createChannelName && c.type === ChannelType.GuildVoice
             );
 
             if (!createChannel) {
+                // Only create if it doesn't exist
                 createChannel = await guild.channels.create({
                     name: config.createChannelName,
                     type: ChannelType.GuildVoice,
-                    parent: category.id,
                     permissionOverwrites: [
                         {
                             id: guild.roles.everyone.id,
@@ -74,9 +61,9 @@ class DynamicVoiceBot {
                         }
                     ]
                 });
-                console.log(`⚓ Created join channel: ${config.createChannelName}`);
+                console.log(`⚓ Created new join channel: ${config.createChannelName}`);
             } else {
-                console.log(`⚓ Found existing join channel: ${config.createChannelName}`);
+                console.log(`⚓ Using existing join channel: ${config.createChannelName}`);
             }
 
             await this.cleanupEmptyChannels(guild);
@@ -104,7 +91,7 @@ class DynamicVoiceBot {
         
         if (channel.name === config.createChannelName) {
             console.log(`🚢 AHOY! ${newState.member.user.tag} joined the crew recruitment channel!`);
-            await this.createNewVoiceChannel(newState.member, guild, channel.parent);
+            await this.createNewVoiceChannel(newState.member, guild);
         }
 
         if (this.deleteTimers.has(channel.id)) {
@@ -138,7 +125,7 @@ class DynamicVoiceBot {
         }
     }
 
-    async createNewVoiceChannel(member, guild, parentCategory) {
+    async createNewVoiceChannel(member, guild) {
         try {
             console.log(`🚧 Creating new pirate crew for ${member.user.tag}...`);
             
@@ -148,7 +135,7 @@ class DynamicVoiceBot {
             const newChannel = await guild.channels.create({
                 name: channelName,
                 type: ChannelType.GuildVoice,
-                parent: parentCategory,
+                // No parent category - channels will appear in the main channel list
                 permissionOverwrites: [
                     {
                         id: guild.roles.everyone.id,
@@ -175,6 +162,7 @@ class DynamicVoiceBot {
 
         } catch (error) {
             console.error(`❌ Failed to create pirate crew for ${member.user.tag}:`, error);
+            console.error(`Error details:`, error.message);
         }
     }
 
