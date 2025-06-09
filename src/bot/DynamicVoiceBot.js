@@ -132,10 +132,15 @@ class DynamicVoiceBot {
             const channelName = this.getRandomChannelName();
             console.log(`🎯 Selected destination: ${channelName}`);
             
+            // Find the join channel to position the new channel right below it
+            const joinChannel = guild.channels.cache.find(
+                c => c.name === config.createChannelName && c.type === ChannelType.GuildVoice
+            );
+            
             const newChannel = await guild.channels.create({
                 name: channelName,
                 type: ChannelType.GuildVoice,
-                // No parent category - channels will appear in the main channel list
+                position: joinChannel ? joinChannel.position + 1 : undefined,
                 permissionOverwrites: [
                     {
                         id: guild.roles.everyone.id,
