@@ -144,31 +144,75 @@ class DynamicVoiceBot {
             const channelName = this.getRandomChannelName();
             console.log(`🎯 Selected destination: ${channelName}`);
             
+            // Find the join channel for positioning
+            const joinChannel = guild.channels.cache.find(
+                c => c.name === config.createChannelName && c.type === ChannelType.GuildVoice
+            );
+            
             // Find the Community category for proper placement
             const communityCategory = guild.channels.cache.find(
                 c => c.name === '✦✗✦ Community ✦✗✦' && c.type === ChannelType.GuildCategory
             );
             
-            const newChannel = await guild.channels.create({
-                name: channelName,
-                type: ChannelType.GuildVoice,
-                parent: communityCategory?.id, // Place in Community category
-                permissionOverwrites: [
-                    {
-                        id: guild.roles.everyone.id,
-                        allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.Connect]
-                    },
-                    {
-                        id: member.id,
-                        allow: [
-                            PermissionFlagsBits.ViewChannel,
-                            PermissionFlagsBits.Connect,
-                            PermissionFlagsBits.ManageChannels,
-                            PermissionFlagsBits.MoveMembers
-                        ]
-                    }
-                ]
-            });
+            // Try creating in category first, fallback to no category if permission denied
+            let newChannel;
+            try {
+                newChannel = await guild.channels.create({
+                    name: channelName,
+                    type: ChannelType.GuildVoice,
+                    parent: communityCategory?.id, // Try Community category first
+                    permissionOverwrites: [
+                        {
+                            id: guild.roles.everyone.id,
+                            allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.Connect]
+                        },
+                        {
+                            id: member.id,
+                            allow: [
+                                PermissionFlagsBits.ViewChannel,
+                                PermissionFlagsBits.Connect,
+                                PermissionFlagsBits.ManageChannels,
+                                PermissionFlagsBits.MoveMembers
+                            ]
+                        }
+                    ]
+                });
+                console.log(`📁 Created ${channelName} in Community category`);
+            } catch (categoryError) {
+                console.log(`⚠️ Cannot create in Community category, trying without category...`);
+                // Fallback: create without category
+                newChannel = await guild.channels.create({
+                    name: channelName,
+                    type: ChannelType.GuildVoice,
+                    // No parent category
+                    permissionOverwrites: [
+                        {
+                            id: guild.roles.everyone.id,
+                            allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.Connect]
+                        },
+                        {
+                            id: member.id,
+                            allow: [
+                                PermissionFlagsBits.ViewChannel,
+                                PermissionFlagsBits.Connect,
+                                PermissionFlagsBits.ManageChannels,
+                                PermissionFlagsBits.MoveMembers
+                            ]
+                        }
+                    ]
+                });
+                console.log(`📁 Created ${channelName} in main channel list (fallback)`);
+            }
+
+            // Position the channel right below the join channel
+            if (joinChannel) {
+                try {
+                    await newChannel.setPosition(joinChannel.position + 1);
+                    console.log(`📍 Positioned ${channelName} right below ${joinChannel.name}`);
+                } catch (posError) {
+                    console.log(`⚠️ Could not set position: ${posError.message}`);
+                }
+            }
 
             this.createdChannels.add(newChannel.id);
             
@@ -176,7 +220,6 @@ class DynamicVoiceBot {
             await member.voice.setChannel(newChannel);
 
             console.log(`🏴‍☠️ NEW PIRATE CREW FORMED: ${channelName} - Captain ${member.user.tag}! ⚓`);
-            console.log(`📁 Crew stationed in Community category`);
 
         } catch (error) {
             console.error(`❌ Failed to create pirate crew for ${member.user.tag}:`, error);
