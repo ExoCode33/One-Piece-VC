@@ -21,10 +21,16 @@ class DynamicVoiceBot {
     setupEventListeners() {
         this.client.once('ready', () => {
             console.log(`✅ Pirate Bot is ready! Logged in as ${this.client.user.tag} 🏴‍☠️`);
+            console.log(`🔧 Debug mode: ${config.debug}`);
+            console.log(`⚓ Create channel name: "${config.createChannelName}"`);
             this.setupGuilds();
         });
 
         this.client.on('voiceStateUpdate', (oldState, newState) => {
+            console.log(`🎤 Voice state update detected!`);
+            console.log(`Old channel: ${oldState.channel?.name || 'None'}`);
+            console.log(`New channel: ${newState.channel?.name || 'None'}`);
+            console.log(`User: ${newState.member?.user.tag || 'Unknown'}`);
             this.handleVoiceStateUpdate(oldState, newState);
         });
 
@@ -39,6 +45,8 @@ class DynamicVoiceBot {
 
     async setupGuild(guild) {
         try {
+            console.log(`🏗️ Setting up guild: ${guild.name}`);
+            
             let category = guild.channels.cache.find(
                 c => c.name === config.categoryName && c.type === ChannelType.GuildCategory
             );
@@ -49,6 +57,8 @@ class DynamicVoiceBot {
                     type: ChannelType.GuildCategory,
                 });
                 console.log(`📁 Created category: ${config.categoryName} 🏴‍☠️`);
+            } else {
+                console.log(`📁 Found existing category: ${config.categoryName}`);
             }
 
             let createChannel = guild.channels.cache.find(
@@ -68,6 +78,19 @@ class DynamicVoiceBot {
                     ]
                 });
                 console.log(`⚓ Created join channel: ${config.createChannelName}`);
+            } else {
+                console.log(`⚓ Found existing join channel: ${config.createChannelName}`);
+            }
+
+            // Debug: Check bot permissions
+            const botMember = guild.members.cache.get(this.client.user.id);
+            if (botMember) {
+                const permissions = botMember.permissions;
+                console.log(`🔑 Bot permissions in ${guild.name}:`);
+                console.log(`  - Manage Channels: ${permissions.has(PermissionFlagsBits.ManageChannels)}`);
+                console.log(`  - Connect: ${permissions.has(PermissionFlagsBits.Connect)}`);
+                console.log(`  - Move Members: ${permissions.has(PermissionFlagsBits.MoveMembers)}`);
+                console.log(`  - View Channels: ${permissions.has(PermissionFlagsBits.ViewChannels)}`);
             }
 
             await this.cleanupEmptyChannels(guild);
@@ -81,19 +104,25 @@ class DynamicVoiceBot {
         const guild = newState.guild || oldState.guild;
         
         if (newState.channel) {
+            console.log(`📞 User joined channel: ${newState.channel.name}`);
             await this.handleChannelJoin(newState, guild);
         }
 
         if (oldState.channel) {
+            console.log(`📴 User left channel: ${oldState.channel.name}`);
             await this.handleChannelLeave(oldState, guild);
         }
     }
 
     async handleChannelJoin(newState, guild) {
         const channel = newState.channel;
+        console.log(`🔍 Checking if "${channel.name}" matches "${config.createChannelName}"`);
         
         if (channel.name === config.createChannelName) {
+            console.log(`✅ Match found! Creating new voice channel for ${newState.member.user.tag}`);
             await this.createNewVoiceChannel(newState.member, guild, channel.parent);
+        } else {
+            console.log(`❌ No match. Channel: "${channel.name}" vs Expected: "${config.createChannelName}"`);
         }
 
         if (this.deleteTimers.has(channel.id)) {
@@ -129,7 +158,17 @@ class DynamicVoiceBot {
 
     async createNewVoiceChannel(member, guild, parentCategory) {
         try {
+            console.log(`🚧 Starting to create new voice channel...`);
+            
+            // Check permissions again before creating
+            const botMember = guild.members.cache.get(this.client.user.id);
+            if (!botMember.permissions.has(PermissionFlagsBits.ManageChannels)) {
+                console.error(`❌ Bot missing Manage Channels permission!`);
+                return;
+            }
+
             const channelName = this.getRandomChannelName();
+            console.log(`🎯 Selected channel name: ${channelName}`);
             
             const newChannel = await guild.channels.create({
                 name: channelName,
@@ -152,13 +191,18 @@ class DynamicVoiceBot {
                 ]
             });
 
+            console.log(`✅ Created channel: ${newChannel.name} (ID: ${newChannel.id})`);
+
             this.createdChannels.add(newChannel.id);
+            
+            console.log(`🚢 Moving ${member.user.tag} to ${newChannel.name}`);
             await member.voice.setChannel(newChannel);
 
             console.log(`🏴‍☠️ Created new pirate crew: ${channelName} for Captain ${member.user.tag}!`);
 
         } catch (error) {
             console.error(`❌ Error creating voice channel for ${member.user.tag}:`, error);
+            console.error(`Error details:`, error.message);
         }
     }
 
@@ -166,6 +210,7 @@ class DynamicVoiceBot {
         const availableNames = onePieceChannels.filter(name => !this.usedChannelNames.has(name));
         
         if (availableNames.length === 0) {
+            console.log(`🔄 Resetting used channel names (all ${onePieceChannels.length} names were used)`);
             this.usedChannelNames.clear();
             availableNames.push(...onePieceChannels);
         }
@@ -173,6 +218,7 @@ class DynamicVoiceBot {
         const randomName = availableNames[Math.floor(Math.random() * availableNames.length)];
         this.usedChannelNames.add(randomName);
         
+        console.log(`🎲 Selected random name: ${randomName} (${availableNames.length} available)`);
         return randomName;
     }
 
@@ -183,6 +229,8 @@ class DynamicVoiceBot {
                 c.members.size === 0 &&
                 c.name !== config.createChannelName
         );
+
+        console.log(`🧹 Found ${channels.size} empty channels to cleanup`);
 
         for (const channel of channels.values()) {
             try {
