@@ -1,4 +1,5 @@
-const { Client, GatewayIntentBits, ChannelType, PermissionFlagsBits, joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, VoiceConnectionStatus } = require('discord.js');
+const { Client, GatewayIntentBits, ChannelType, PermissionFlagsBits } = require('discord.js');
+const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, VoiceConnectionStatus } = require('@discordjs/voice');
 const config = require('../../config/config');
 const { onePieceChannels } = require('../../config/channels');
 
