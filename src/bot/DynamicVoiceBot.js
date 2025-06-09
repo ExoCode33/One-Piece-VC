@@ -147,7 +147,7 @@ class DynamicVoiceBot {
 
     async playJoinSound(channel, guild) {
         try {
-            console.log(`🎵 Playing One Piece welcome sound...`);
+            console.log(`🎵 Playing The Going Merry welcome sound...`);
             
             // Join the voice channel
             const connection = joinVoiceChannel({
@@ -160,38 +160,59 @@ class DynamicVoiceBot {
 
             // Wait for connection to be ready
             connection.on(VoiceConnectionStatus.Ready, () => {
-                console.log(`🎤 Bot connected to ${channel.name}`);
+                console.log(`🎤 Bot connected to ${channel.name} - Playing Going Merry sound! ⚓`);
+                
+                try {
+                    // Create audio player and resource
+                    const player = createAudioPlayer();
+                    const resource = createAudioResource('./sounds/The Going Merry One Piece - Cut.mp3');
+                    
+                    // Play the sound
+                    player.play(resource);
+                    connection.subscribe(player);
+                    
+                    console.log(`🎶 🚢 Playing: The Going Merry One Piece - Cut! ⚓`);
+                    
+                    // Handle player events
+                    player.on(AudioPlayerStatus.Playing, () => {
+                        console.log(`🎵 Going Merry sound is now playing!`);
+                    });
+                    
+                    player.on(AudioPlayerStatus.Idle, () => {
+                        console.log(`🎵 Going Merry sound finished playing`);
+                        // Disconnect after sound finishes
+                        setTimeout(() => {
+                            if (this.audioConnections.has(guild.id)) {
+                                connection.destroy();
+                                this.audioConnections.delete(guild.id);
+                                console.log(`⚓ Disconnected from voice channel`);
+                            }
+                        }, 1000);
+                    });
+                    
+                    player.on('error', (error) => {
+                        console.error(`🎵 Audio player error:`, error);
+                        connection.destroy();
+                        this.audioConnections.delete(guild.id);
+                    });
+                    
+                } catch (audioError) {
+                    console.log(`⚠️ Could not play audio file: ${audioError.message}`);
+                    // Disconnect if audio fails
+                    setTimeout(() => {
+                        connection.destroy();
+                        this.audioConnections.delete(guild.id);
+                    }, 2000);
+                }
             });
 
-            // Create audio player
-            const player = createAudioPlayer();
-            
-            // One Piece sound effects (you can add actual sound files)
-            const soundEffects = [
-                '🎵 *Pirate ship bell rings* 🔔',
-                '🎵 *Sea waves crashing* 🌊', 
-                '🎵 *Jolly Roger flag flapping* 🏴‍☠️',
-                '🎵 *Ship horn blowing* 📯',
-                '🎵 *Anchor dropping* ⚓'
-            ];
-            
-            const randomSound = soundEffects[Math.floor(Math.random() * soundEffects.length)];
-            console.log(`🎶 Playing: ${randomSound}`);
-            
-            // For now, we'll simulate audio with a message
-            // In production, you'd use: createAudioResource('path/to/sound.mp3')
-            
-            // Disconnect after 3 seconds
-            setTimeout(() => {
-                if (this.audioConnections.has(guild.id)) {
-                    connection.destroy();
-                    this.audioConnections.delete(guild.id);
-                    console.log(`🎵 Finished playing welcome sound`);
-                }
-            }, 3000);
+            connection.on('error', (error) => {
+                console.error(`🎤 Voice connection error:`, error);
+                this.audioConnections.delete(guild.id);
+            });
 
         } catch (error) {
-            console.log(`⚠️ Could not play join sound: ${error.message}`);
+            console.log(`⚠️ Could not join voice channel: ${error.message}`);
         }
     }
         try {
