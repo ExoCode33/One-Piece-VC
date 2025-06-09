@@ -1,21 +1,38 @@
 {
   "name": "one-piece-discord-bot",
   "version": "1.0.0",
-  "description": "A One Piece themed Discord bot that dynamically creates and manages voice channels",
+  "description": "A One Piece themed Discord bot that dynamically creates and manages voice channels with authentic sound effects",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
-    "dev": "nodemon src/index.js"
+    "dev": "nodemon src/index.js",
+    "test": "jest",
+    "lint": "eslint src/",
+    "lint:fix": "eslint src/ --fix"
   },
-  "keywords": ["discord", "bot", "one-piece", "voice-channels"],
+  "keywords": [
+    "discord",
+    "bot", 
+    "one-piece",
+    "voice-channels",
+    "dynamic",
+    "pirate",
+    "audio",
+    "sound-effects"
+  ],
   "author": "ExoCode33",
   "license": "MIT",
   "dependencies": {
     "discord.js": "^14.14.1",
-    "dotenv": "^16.3.1"
+    "dotenv": "^16.3.1",
+    "@discordjs/voice": "^0.16.1",
+    "sodium-native": "^4.0.4",
+    "ffmpeg-static": "^5.2.0"
   },
   "devDependencies": {
-    "nodemon": "^3.0.2"
+    "nodemon": "^3.0.2",
+    "eslint": "^8.56.0",
+    "jest": "^29.7.0"
   },
   "engines": {
     "node": ">=16.0.0"
