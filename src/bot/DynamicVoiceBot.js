@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits, ChannelType, PermissionFlagsBits } = require('discord.js');
+const { Client, GatewayIntentBits, ChannelType, PermissionFlagsBits, joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, VoiceConnectionStatus } = require('discord.js');
 const config = require('../../config/config');
 const { onePieceChannels } = require('../../config/channels');
 
@@ -14,6 +14,7 @@ class DynamicVoiceBot {
         this.createdChannels = new Set();
         this.deleteTimers = new Map();
         this.usedChannelNames = new Set();
+        this.audioConnections = new Map(); // Track voice connections
         
         this.setupEventListeners();
     }
@@ -103,7 +104,14 @@ class DynamicVoiceBot {
         
         if (channel.name === config.createChannelName) {
             console.log(`🚢 AHOY! ${newState.member.user.tag} joined the crew recruitment channel!`);
-            await this.createNewVoiceChannel(newState.member, guild);
+            
+            // Play One Piece sound effect
+            await this.playJoinSound(channel, guild);
+            
+            // Create new voice channel after a short delay (let sound play)
+            setTimeout(async () => {
+                await this.createNewVoiceChannel(newState.member, guild);
+            }, 2000); // 2 second delay to let sound play
         }
 
         if (this.deleteTimers.has(channel.id)) {
@@ -137,7 +145,55 @@ class DynamicVoiceBot {
         }
     }
 
-    async createNewVoiceChannel(member, guild) {
+    async playJoinSound(channel, guild) {
+        try {
+            console.log(`🎵 Playing One Piece welcome sound...`);
+            
+            // Join the voice channel
+            const connection = joinVoiceChannel({
+                channelId: channel.id,
+                guildId: guild.id,
+                adapterCreator: guild.voiceAdapterCreator,
+            });
+
+            this.audioConnections.set(guild.id, connection);
+
+            // Wait for connection to be ready
+            connection.on(VoiceConnectionStatus.Ready, () => {
+                console.log(`🎤 Bot connected to ${channel.name}`);
+            });
+
+            // Create audio player
+            const player = createAudioPlayer();
+            
+            // One Piece sound effects (you can add actual sound files)
+            const soundEffects = [
+                '🎵 *Pirate ship bell rings* 🔔',
+                '🎵 *Sea waves crashing* 🌊', 
+                '🎵 *Jolly Roger flag flapping* 🏴‍☠️',
+                '🎵 *Ship horn blowing* 📯',
+                '🎵 *Anchor dropping* ⚓'
+            ];
+            
+            const randomSound = soundEffects[Math.floor(Math.random() * soundEffects.length)];
+            console.log(`🎶 Playing: ${randomSound}`);
+            
+            // For now, we'll simulate audio with a message
+            // In production, you'd use: createAudioResource('path/to/sound.mp3')
+            
+            // Disconnect after 3 seconds
+            setTimeout(() => {
+                if (this.audioConnections.has(guild.id)) {
+                    connection.destroy();
+                    this.audioConnections.delete(guild.id);
+                    console.log(`🎵 Finished playing welcome sound`);
+                }
+            }, 3000);
+
+        } catch (error) {
+            console.log(`⚠️ Could not play join sound: ${error.message}`);
+        }
+    }
         try {
             console.log(`🚧 Creating new pirate crew for ${member.user.tag}...`);
             
@@ -276,9 +332,16 @@ class DynamicVoiceBot {
     async stop() {
         console.log('🛑 The pirate crew is disbanding...');
         
+        // Clear all timers
         for (const timer of this.deleteTimers.values()) {
             clearTimeout(timer);
         }
+        
+        // Disconnect from all voice channels
+        for (const connection of this.audioConnections.values()) {
+            connection.destroy();
+        }
+        this.audioConnections.clear();
         
         await this.client.destroy();
     }
