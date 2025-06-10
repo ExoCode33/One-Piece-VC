@@ -116,18 +116,8 @@ class DynamicVoiceBot {
         if (channel.name === config.createChannelName) {
             console.log(`🚢 AHOY! ${newState.member.user.tag} joined the crew recruitment channel!`);
             
-            // Try to play sound if voice support is available
-            if (this.hasVoiceSupport) {
-                await this.playJoinSound(channel, guild);
-                // Create channel after sound delay
-                setTimeout(async () => {
-                    await this.createNewVoiceChannel(newState.member, guild);
-                }, 2000);
-            } else {
-                // No audio support, show text effect and create channel immediately
-                console.log(`🎵 *The Going Merry bell rings in the distance* 🔔⚓`);
-                await this.createNewVoiceChannel(newState.member, guild);
-            }
+            // Create new voice channel FIRST, then move user, THEN play sound
+            await this.createNewVoiceChannel(newState.member, guild);
         }
 
         if (this.deleteTimers.has(channel.id)) {
@@ -322,6 +312,15 @@ class DynamicVoiceBot {
             await member.voice.setChannel(newChannel);
 
             console.log(`🏴‍☠️ NEW PIRATE CREW FORMED: ${channelName} - Captain ${member.user.tag}! ⚓`);
+
+            // NOW play the welcome sound in the NEW channel
+            if (this.hasVoiceSupport) {
+                setTimeout(async () => {
+                    await this.playJoinSound(newChannel, guild);
+                }, 1000); // Small delay to ensure user is moved
+            } else {
+                console.log(`🎵 *The Going Merry bell rings welcoming the new crew* 🔔⚓`);
+            }
 
         } catch (error) {
             console.error(`❌ Failed to create pirate crew for ${member.user.tag}:`, error);
