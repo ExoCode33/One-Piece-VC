@@ -398,7 +398,7 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
                 setTimeout(async () => {
                     try {
                         // Double-check it's still empty
-                        const channelToDelete = guild.channels.cache.get(oldChannel.id);
+                        const channelToDelete = oldChannel.guild.channels.cache.get(oldChannel.id);
                         if (channelToDelete && channelToDelete.members.size === 0) {
                             await channelToDelete.delete();
                             debugLog(`🗑️ Deleted empty crew: ${oldChannel.name}`);
