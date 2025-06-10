@@ -234,22 +234,18 @@ client.on('messageCreate', async (message) => {
         let cleaned = 0;
         voiceConnections.forEach((connection, key) => {
             try {
-                connection.destroy();
-                voiceConnections.delete(key);
+                // Only destroy if not already destroyed
+                if (connection.state.status !== VoiceConnectionStatus.Destroyed) {
+                    connection.destroy();
+                }
                 cleaned++;
             } catch (err) {
                 console.log(`Error destroying connection: ${err.message}`);
             }
         });
         
-        audioPlayers.forEach((player, key) => {
-            try {
-                player.stop();
-                audioPlayers.delete(key);
-            } catch (err) {
-                console.log(`Error stopping player: ${err.message}`);
-            }
-        });
+        voiceConnections.clear();
+        audioPlayers.clear();
         
         message.reply(`🧹 Cleaned up ${cleaned} voice connections!`);
     }
@@ -289,7 +285,11 @@ async function playAudio(channel) {
             try {
                 if (voiceConnections.has(connectionKey)) {
                     const conn = voiceConnections.get(connectionKey);
-                    conn.destroy();
+                    // Check if connection is not already destroyed
+                    if (conn.state.status !== VoiceConnectionStatus.Destroyed) {
+                        conn.destroy();
+                        console.log(`🔌 Connection destroyed for ${channelName}`);
+                    }
                     voiceConnections.delete(connectionKey);
                 }
                 if (audioPlayers.has(connectionKey)) {
@@ -352,7 +352,10 @@ function gracefulShutdown() {
     
     voiceConnections.forEach((connection, key) => {
         try {
-            connection.destroy();
+            // Only destroy if not already destroyed
+            if (connection.state.status !== VoiceConnectionStatus.Destroyed) {
+                connection.destroy();
+            }
         } catch (err) {
             console.log(`Error destroying connection: ${err.message}`);
         }
