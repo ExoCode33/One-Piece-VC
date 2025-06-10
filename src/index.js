@@ -22,13 +22,66 @@ const client = new Client({
     ]
 });
 
-// One Piece themed channel names
+// One Piece themed channel names - Lore accurate locations
 const onePieceLocations = [
+    // Ships
     "🏴‍☠️ Going Merry Crew",
     "⚓ Thousand Sunny Squad",
+    "🚢 Red Force Fleet",
+    "⛵ Moby Dick Division",
+    "🛥️ Polar Tang Submarine",
+    
+    // Grand Line Islands
     "🏝️ Water 7 Workshop",
     "🌊 Enies Lobby Expedition",
-    "🏴‍☠️ Alabasta Adventure"
+    "🏴‍☠️ Alabasta Adventure",
+    "🏖️ Skypiea Sanctuary",
+    "🌋 Drum Island Doctors",
+    "🌸 Sakura Kingdom",
+    "🏛️ Ohara Scholars",
+    "🌙 Thriller Bark",
+    "🐠 Fish-Man Island",
+    "🌺 Amazon Lily",
+    "⚡ Raijin Island",
+    "🎪 Long Ring Long Land",
+    "🏰 Mariejois Marines",
+    "🌊 Sabaody Archipelago",
+    "🔥 Punk Hazard",
+    "🍰 Whole Cake Island",
+    "🌸 Wano Country",
+    "🦅 Jaya Skyward",
+    "🌊 Reverse Mountain",
+    "🏝️ Little Garden",
+    "🦴 Bone Cape",
+    "🌪️ Whisky Peak",
+    "🌊 Loguetown",
+    "🏔️ Twin Cape",
+    
+    // New World Islands
+    "💎 Dressrosa Arena",
+    "🌊 Zou Elephant",
+    "🔥 Tottoland Territory",
+    "⚔️ Onigashima Raid",
+    "🌊 Egghead Island",
+    "🏝️ Elbaf Giants",
+    "🌊 Laugh Tale",
+    "🔥 God Valley",
+    "🌊 Lodestar Island",
+    
+    // Marine Bases
+    "⚓ Marine Base G-8",
+    "🏛️ Marineford HQ",
+    "⚓ Impel Down",
+    "🏛️ Navy Base 153",
+    
+    // Crew Hangouts
+    "🍖 Baratie Kitchen",
+    "📚 Ohara Library",
+    "🎭 Orange Town",
+    "🌊 Cocoyasi Village",
+    "🐑 Syrup Village",
+    "🏥 Drum Castle",
+    "🌸 Bell-mère's Grove"
 ];
 
 // Store active connections
