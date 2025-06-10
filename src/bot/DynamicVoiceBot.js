@@ -279,6 +279,44 @@ async function playAudio(channel, member) {
     const connectionKey = `${guildId}-${channelId}`;
     
     console.log(`🎵 playAudio() called for channel: ${channelName}`);
+    console.log(`🔍 Connection key will be: ${connectionKey}`);
+    
+    // SET TIMER FIRST - before anything else can go wrong
+    console.log(`⏰ Setting IMMEDIATE 5-second cleanup timer FIRST`);
+    const cleanupTimer = setTimeout(() => {
+        console.log(`🚨 5-SECOND TIMER FIRED! Cleaning up ${channelName}`);
+        console.log(`🔍 Looking for connection: ${connectionKey}`);
+        console.log(`🔍 Connections in map: ${Array.from(voiceConnections.keys())}`);
+        console.log(`🔍 Players in map: ${Array.from(audioPlayers.keys())}`);
+        
+        // Force cleanup everything
+        voiceConnections.forEach((conn, key) => {
+            console.log(`🔌 Destroying connection ${key}`);
+            try {
+                conn.destroy();
+            } catch (e) {
+                console.log(`Error destroying: ${e.message}`);
+            }
+        });
+        
+        audioPlayers.forEach((player, key) => {
+            console.log(`🎵 Stopping player ${key}`);
+            try {
+                player.stop();
+            } catch (e) {
+                console.log(`Error stopping: ${e.message}`);
+            }
+        });
+        
+        voiceConnections.clear();
+        audioPlayers.clear();
+        cleanupTimers.clear();
+        
+        console.log(`✅ NUCLEAR CLEANUP COMPLETED`);
+    }, 5000);
+    
+    cleanupTimers.set(connectionKey, cleanupTimer);
+    console.log(`✅ Timer set and stored. Will fire in 5 seconds.`);
     
     try {
         if (!fs.existsSync(audioFilePath)) {
@@ -296,53 +334,6 @@ async function playAudio(channel, member) {
 
         voiceConnections.set(connectionKey, connection);
         console.log(`💾 Stored voice connection with key: ${connectionKey}`);
-
-        // IMMEDIATE cleanup timer setup - debug this heavily
-        console.log(`⏰ About to set IMMEDIATE 5-second cleanup timer for ${channelName}`);
-        console.log(`🔍 Connection key: ${connectionKey}`);
-        console.log(`🔍 Channel ID: ${channelId}`);
-        console.log(`🔍 Guild ID: ${guildId}`);
-        
-        const cleanupTimer = setTimeout(() => {
-            console.log(`🚨 5 SECONDS UP! Force disconnecting from ${channelName}`);
-            console.log(`🔍 About to destroy connection for key: ${connectionKey}`);
-            console.log(`🔍 Connection exists in map: ${voiceConnections.has(connectionKey)}`);
-            console.log(`🔍 Player exists in map: ${audioPlayers.has(connectionKey)}`);
-            
-            try {
-                if (voiceConnections.has(connectionKey)) {
-                    const conn = voiceConnections.get(connectionKey);
-                    console.log(`🔌 Destroying connection... Status: ${conn.state.status}`);
-                    conn.destroy();
-                    voiceConnections.delete(connectionKey);
-                    console.log(`✅ Connection destroyed and removed`);
-                } else {
-                    console.log(`❌ No connection found for key: ${connectionKey}`);
-                }
-                
-                if (audioPlayers.has(connectionKey)) {
-                    const player = audioPlayers.get(connectionKey);
-                    console.log(`🎵 Stopping player...`);
-                    player.stop();
-                    audioPlayers.delete(connectionKey);
-                    console.log(`✅ Player stopped and removed`);
-                } else {
-                    console.log(`❌ No player found for key: ${connectionKey}`);
-                }
-                
-                console.log(`✅ CLEANUP COMPLETED for ${channelName}`);
-            } catch (error) {
-                console.error(`❌ Error in cleanup: ${error.message}`);
-                console.error(`❌ Error stack: ${error.stack}`);
-            }
-        }, 5000);
-        
-        console.log(`✅ Timer created and will fire in 5 seconds`);
-        console.log(`🔍 Timer object: ${cleanupTimer ? 'exists' : 'null'}`);
-        
-        // Store the timer reference
-        cleanupTimers.set(connectionKey, cleanupTimer);
-        console.log(`💾 Timer stored in map with key: ${connectionKey}`);
 
         connection.on(VoiceConnectionStatus.Ready, () => {
             console.log('✅ Voice connection is ready!');
@@ -368,17 +359,17 @@ async function playAudio(channel, member) {
 
                 player.on(AudioPlayerStatus.Idle, () => {
                     console.log(`🎵 Audio finished playing in ${channelName}`);
-                    // Don't try to cleanup here - let the 5-second timer handle it
+                    // Don't cleanup here - let the timer handle it
                 });
 
                 player.on('error', error => {
                     console.error('❌ Audio player error:', error);
-                    // Don't try to cleanup here - let the 5-second timer handle it
+                    // Don't cleanup here - let the timer handle it
                 });
 
             } catch (audioError) {
                 console.error('❌ Error setting up audio:', audioError);
-                // Don't try to cleanup here - let the 5-second timer handle it
+                // Don't cleanup here - let the timer handle it
             }
         });
 
