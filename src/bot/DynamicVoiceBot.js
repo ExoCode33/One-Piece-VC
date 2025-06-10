@@ -206,32 +206,66 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
     }
 });
 
-// Manual cleanup command
+// Manual cleanup command with debug logging
 client.on('messageCreate', async (message) => {
-    if (message.content === '!forceLeave' && message.member.permissions.has(PermissionFlagsBits.Administrator)) {
-        console.log('🧹 Force leave command received');
+    console.log(`📨 Message received: "${message.content}" from ${message.author.tag}`);
+    
+    if (message.content === '!forceLeave') {
+        console.log('🎯 Force leave command detected!');
+        console.log(`👤 User: ${message.author.tag}`);
+        console.log(`🔑 Has admin permissions: ${message.member?.permissions?.has(PermissionFlagsBits.Administrator)}`);
         
-        voiceConnections.forEach((connection, key) => {
-            console.log(`🔌 Force destroying connection: ${key}`);
-            try {
-                connection.destroy();
-                voiceConnections.delete(key);
-            } catch (err) {
-                console.log(`Error destroying connection ${key}:`, err.message);
+        if (message.member?.permissions?.has(PermissionFlagsBits.Administrator)) {
+            console.log('🧹 Force leave command received - executing cleanup');
+            console.log(`📊 Active connections: ${voiceConnections.size}`);
+            console.log(`📊 Active players: ${audioPlayers.size}`);
+            
+            if (voiceConnections.size === 0 && audioPlayers.size === 0) {
+                console.log('ℹ️ No active connections or players to clean up');
+                message.reply('ℹ️ No active voice connections to clean up!');
+                return;
             }
-        });
-        
-        audioPlayers.forEach((player, key) => {
-            console.log(`🎵 Force stopping player: ${key}`);
-            try {
-                player.stop();
-                audioPlayers.delete(key);
-            } catch (err) {
-                console.log(`Error stopping player ${key}:`, err.message);
-            }
-        });
-        
-        message.reply('🧹 Bot forced to leave all voice channels!');
+            
+            voiceConnections.forEach((connection, key) => {
+                console.log(`🔌 Force destroying connection: ${key}`);
+                try {
+                    connection.destroy();
+                    voiceConnections.delete(key);
+                    console.log(`✅ Connection ${key} destroyed`);
+                } catch (err) {
+                    console.log(`❌ Error destroying connection ${key}:`, err.message);
+                }
+            });
+            
+            audioPlayers.forEach((player, key) => {
+                console.log(`🎵 Force stopping player: ${key}`);
+                try {
+                    player.stop();
+                    audioPlayers.delete(key);
+                    console.log(`✅ Player ${key} stopped`);
+                } catch (err) {
+                    console.log(`❌ Error stopping player ${key}:`, err.message);
+                }
+            });
+            
+            console.log('✅ Force cleanup completed');
+            message.reply('🧹 Bot forced to leave all voice channels!');
+        } else {
+            console.log('❌ User does not have admin permissions');
+            message.reply('❌ You need administrator permissions to use this command!');
+        }
+    }
+    
+    // Debug command to check bot status
+    if (message.content === '!status') {
+        console.log('📊 Status command received');
+        const status = `
+📊 **Bot Status:**
+🔌 Active connections: ${voiceConnections.size}
+🎵 Active players: ${audioPlayers.size}
+🤖 Bot user: ${client.user.tag}
+`;
+        message.reply(status);
     }
 });
 
@@ -348,12 +382,15 @@ async function playAudio(channel, member) {
 
                 player.on(AudioPlayerStatus.Idle, () => {
                     console.log(`🎵 Audio finished playing in ${channelName}`);
+                    console.log(`🔄 Clearing force disconnect timer...`);
                     
                     // Clear the force disconnect timer since we're handling it now
                     clearTimeout(forceDisconnectTimer);
+                    console.log(`✅ Timer cleared, scheduling cleanup...`);
                     
                     // Small delay to ensure audio finished cleanly, then disconnect
                     setTimeout(() => {
+                        console.log(`🧹 Executing cleanup after audio finished...`);
                         cleanupConnection('audio-finished');
                     }, 1000);
                 });
