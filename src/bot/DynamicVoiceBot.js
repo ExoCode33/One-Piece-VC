@@ -273,50 +273,45 @@ client.on('messageCreate', async (message) => {
 });
 
 async function playAudio(channel, member) {
+    console.log(`🎵 playAudio() called - STARTING TIMER IMMEDIATELY`);
+    
+    // SET TIMER FIRST THING - before any other code
+    const cleanupTimer = setTimeout(() => {
+        console.log(`🚨 5-SECOND TIMER FIRED! NUCLEAR CLEANUP`);
+        console.log(`🔍 Total connections: ${voiceConnections.size}`);
+        console.log(`🔍 Total players: ${audioPlayers.size}`);
+        
+        // Destroy everything
+        try {
+            voiceConnections.forEach((conn, key) => {
+                console.log(`🔌 Nuking connection ${key}`);
+                conn.destroy();
+            });
+            
+            audioPlayers.forEach((player, key) => {
+                console.log(`🎵 Nuking player ${key}`);
+                player.stop();
+            });
+            
+            voiceConnections.clear();
+            audioPlayers.clear();
+            cleanupTimers.clear();
+            
+            console.log(`✅ NUCLEAR CLEANUP COMPLETED - Bot should be gone`);
+        } catch (error) {
+            console.error(`❌ Error in nuclear cleanup: ${error.message}`);
+        }
+    }, 5000);
+    
+    console.log(`✅ 5-SECOND NUCLEAR TIMER IS SET`);
+    
     const channelName = channel.name;
     const channelId = channel.id;
     const guildId = channel.guild.id;
     const connectionKey = `${guildId}-${channelId}`;
     
-    console.log(`🎵 playAudio() called for channel: ${channelName}`);
-    console.log(`🔍 Connection key will be: ${connectionKey}`);
-    
-    // SET TIMER FIRST - before anything else can go wrong
-    console.log(`⏰ Setting IMMEDIATE 5-second cleanup timer FIRST`);
-    const cleanupTimer = setTimeout(() => {
-        console.log(`🚨 5-SECOND TIMER FIRED! Cleaning up ${channelName}`);
-        console.log(`🔍 Looking for connection: ${connectionKey}`);
-        console.log(`🔍 Connections in map: ${Array.from(voiceConnections.keys())}`);
-        console.log(`🔍 Players in map: ${Array.from(audioPlayers.keys())}`);
-        
-        // Force cleanup everything
-        voiceConnections.forEach((conn, key) => {
-            console.log(`🔌 Destroying connection ${key}`);
-            try {
-                conn.destroy();
-            } catch (e) {
-                console.log(`Error destroying: ${e.message}`);
-            }
-        });
-        
-        audioPlayers.forEach((player, key) => {
-            console.log(`🎵 Stopping player ${key}`);
-            try {
-                player.stop();
-            } catch (e) {
-                console.log(`Error stopping: ${e.message}`);
-            }
-        });
-        
-        voiceConnections.clear();
-        audioPlayers.clear();
-        cleanupTimers.clear();
-        
-        console.log(`✅ NUCLEAR CLEANUP COMPLETED`);
-    }, 5000);
-    
     cleanupTimers.set(connectionKey, cleanupTimer);
-    console.log(`✅ Timer set and stored. Will fire in 5 seconds.`);
+    console.log(`💾 Timer stored for ${channelName}`);
     
     try {
         if (!fs.existsSync(audioFilePath)) {
@@ -359,17 +354,14 @@ async function playAudio(channel, member) {
 
                 player.on(AudioPlayerStatus.Idle, () => {
                     console.log(`🎵 Audio finished playing in ${channelName}`);
-                    // Don't cleanup here - let the timer handle it
                 });
 
                 player.on('error', error => {
                     console.error('❌ Audio player error:', error);
-                    // Don't cleanup here - let the timer handle it
                 });
 
             } catch (audioError) {
                 console.error('❌ Error setting up audio:', audioError);
-                // Don't cleanup here - let the timer handle it
             }
         });
 
