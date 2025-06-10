@@ -18,7 +18,7 @@ const client = new Client({
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildVoiceStates,
         GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.MessageContent
+        GatewayIntentBits.MessageContent // This is crucial for reading message content
     ]
 });
 
@@ -208,7 +208,17 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
 
 // Manual cleanup command with debug logging
 client.on('messageCreate', async (message) => {
+    // Ignore bot messages
+    if (message.author.bot) return;
+    
     console.log(`📨 Message received: "${message.content}" from ${message.author.tag}`);
+    
+    // Simple test command
+    if (message.content === '!ping') {
+        console.log('🏓 Ping command received');
+        message.reply('🏴‍☠️ Pong! Bot is working!');
+        return;
+    }
     
     if (message.content === '!forceLeave') {
         console.log('🎯 Force leave command detected!');
@@ -242,7 +252,6 @@ client.on('messageCreate', async (message) => {
                 try {
                     player.stop();
                     audioPlayers.delete(key);
-                    console.log(`✅ Player ${key} stopped`);
                 } catch (err) {
                     console.log(`❌ Error stopping player ${key}:`, err.message);
                 }
