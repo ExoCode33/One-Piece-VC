@@ -1,99 +1,232 @@
-const { Client, GatewayIntentBits, Collection, EmbedBuilder, PermissionFlagsBits, ChannelType } = require('discord.js');
-const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus } = require('@discordjs/voice');
-const fs = require('fs');
-const path = require('path');
-require('dotenv').config();
+const { Client, GatewayIntentBits, ChannelType, PermissionFlagsBits } = require('discord.js');
 
-// Import AFK Manager
-const AFKManager = require('./afkManager');
+// Load environment variables only in development
+if (process.env.NODE_ENV !== 'production') {
+    require('dotenv').config();
+}
 
+// Configuration from environment variables
+const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
+const CLIENT_ID = process.env.CLIENT_ID;
+const CREATE_CHANNEL_NAME = process.env.CREATE_CHANNEL_NAME || '🏴‍☠️ Set Sail Together';
+const CATEGORY_NAME = process.env.CATEGORY_NAME || '🌊 Grand Line Voice Channels';
+const DELETE_DELAY = parseInt(process.env.DELETE_DELAY) || 5000;
+
+// AFK Management Settings (from Railway variables)
+const AFK_TIMEOUT = parseInt(process.env.AFK_TIMEOUT) || 900000; // Default 15 minutes
+const AFK_EXCLUDED_CHANNELS = process.env.AFK_EXCLUDED_CHANNELS 
+    ? process.env.AFK_EXCLUDED_CHANNELS.split(',').map(ch => ch.trim()) 
+    : ['Lofi/Chill']; // Default fallback
+
+const DEBUG = process.env.DEBUG === 'true';
+
+// One Piece themed channel names
+const CREW_NAMES = [
+    '🐠 Fish-Man Island',
+    '🏝️ Skypiea Adventure',
+    '🌸 Sakura Kingdom',
+    '🏜️ Alabasta Palace',
+    '🌋 Punk Hazard Lab',
+    '🍭 Whole Cake Island',
+    '🌺 Wano Country',
+    '⚡ Thriller Bark',
+    '🗿 Jaya Island',
+    '🌊 Water 7 Docks',
+    '🔥 Marineford War',
+    '🏴‍☠️ Thousand Sunny',
+    '⚓ Going Merry',
+    '🦈 Arlong Park',
+    '🎪 Buggy\'s Circus',
+    '🍖 Baratie Restaurant',
+    '📚 Ohara Library',
+    '🌙 Zou Elephant',
+    '⚔️ Dressrosa Colosseum',
+    '🎭 Sabaody Archipelago',
+    '🌟 Reverse Mountain',
+    '🐉 Kaido\'s Lair',
+    '🍃 Amazon Lily',
+    '❄️ Drum Island',
+    '🔱 Fishman District',
+    '🌈 Long Ring Island',
+    '🏰 Enies Lobby',
+    '🌺 Rusukaina Island',
+    '🔥 Ace\'s Adventure',
+    '⚡ Enel\'s Ark'
+];
+
+// Create Discord client
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildVoiceStates,
-        GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.MessageContent
+        GatewayIntentBits.GuildMessages
     ]
 });
 
-// Initialize AFK Manager
-let afkManager;
+// Track users and their AFK timers
+const userTimers = new Map();
+const trackedUsers = new Map();
 
-// One Piece themed channel names
-const piratePlaces = [
-    "🏴‍☠️ Going Merry",
-    "⛵ Thousand Sunny", 
-    "🏝️ Laugh Tale",
-    "🌊 Water 7",
-    "🌸 Wano Country",
-    "🐠 Fish-Man Island",
-    "☁️ Skypiea",
-    "🏜️ Alabasta",
-    "❄️ Drum Island",
-    "🌺 Amazon Lily",
-    "⚡ Enel's Ship",
-    "🔥 Ace's Striker",
-    "⚓ Marine Ship",
-    "🏛️ Enies Lobby",
-    "🌪️ Thriller Bark",
-    "🗿 Jaya Island",
-    "🦅 Bird Kingdom",
-    "🐉 Punk Hazard",
-    "🍭 Whole Cake Island",
-    "⚔️ Dressrosa",
-    "🌋 Marineford",
-    "🏰 Impel Down",
-    "🦈 Arlong Park",
-    "🎪 Buggy's Ship",
-    "⭐ Baratie Restaurant",
-    "🍊 Cocoyasi Village",
-    "🏝️ Little Garden",
-    "🌙 Ohara Island",
-    "🎭 Mock Town",
-    "🏔️ Reverse Mountain"
-];
+// Helper functions
+function log(message) {
+    console.log(`🏴‍☠️ ${message}`);
+}
 
-const createdChannels = new Set();
+function debugLog(message) {
+    if (DEBUG) {
+        console.log(`🔍 DEBUG: ${message}`);
+    }
+}
 
+function getRandomCrewName() {
+    return CREW_NAMES[Math.floor(Math.random() * CREW_NAMES.length)];
+}
+
+function isProtectedChannel(channelName) {
+    return AFK_EXCLUDED_CHANNELS.some(protected => 
+        channelName.toLowerCase().includes(protected.toLowerCase())
+    );
+}
+
+function formatTime(ms) {
+    const minutes = Math.floor(ms / 60000);
+    const seconds = Math.floor((ms % 60000) / 1000);
+    if (minutes > 0) {
+        return `${minutes} minute${minutes !== 1 ? 's' : ''}${seconds > 0 ? ` ${seconds} second${seconds !== 1 ? 's' : ''}` : ''}`;
+    }
+    return `${seconds} second${seconds !== 1 ? 's' : ''}`;
+}
+
+// AFK Management Functions
+function startAFKTimer(userId, channelId, channelName) {
+    // Don't start timer for protected channels
+    if (isProtectedChannel(channelName)) {
+        debugLog(`Skipping AFK timer for protected channel: ${channelName}`);
+        return;
+    }
+
+    // Clear existing timer if any
+    clearAFKTimer(userId);
+
+    debugLog(`Starting AFK timer for user ${userId} in ${channelName} (${formatTime(AFK_TIMEOUT)})`);
+
+    const timer = setTimeout(async () => {
+        try {
+            const guild = client.guilds.cache.find(g => g.channels.cache.has(channelId));
+            if (!guild) return;
+
+            const member = await guild.members.fetch(userId).catch(() => null);
+            if (!member || !member.voice.channelId) {
+                debugLog(`User ${userId} no longer in voice channel`);
+                return;
+            }
+
+            // Double-check they're still in a non-protected channel
+            const currentChannel = guild.channels.cache.get(member.voice.channelId);
+            if (!currentChannel || isProtectedChannel(currentChannel.name)) {
+                debugLog(`User ${userId} is now in protected channel: ${currentChannel?.name}`);
+                return;
+            }
+
+            // Disconnect the user
+            await member.voice.disconnect('AFK timeout - inactive for too long');
+            log(`⏰ Disconnected ${member.displayName} for being AFK (${formatTime(AFK_TIMEOUT)} timeout)`);
+
+            // Send a friendly message
+            try {
+                await member.send(`🏴‍☠️ Ahoy! You were disconnected from **${currentChannel.name}** for being inactive for ${formatTime(AFK_TIMEOUT)}. The seas await your return, nakama! 🌊`);
+            } catch (dmError) {
+                debugLog(`Could not send DM to ${member.displayName}: ${dmError.message}`);
+            }
+
+        } catch (error) {
+            console.error(`❌ Error handling AFK timeout for user ${userId}:`, error);
+        } finally {
+            userTimers.delete(userId);
+            trackedUsers.delete(userId);
+        }
+    }, AFK_TIMEOUT);
+
+    userTimers.set(userId, timer);
+    trackedUsers.set(userId, { channelId, channelName, startTime: Date.now() });
+}
+
+function clearAFKTimer(userId) {
+    const timer = userTimers.get(userId);
+    if (timer) {
+        clearTimeout(timer);
+        userTimers.delete(userId);
+        debugLog(`Cleared AFK timer for user ${userId}`);
+    }
+}
+
+function resetAFKTimer(userId, channelId, channelName) {
+    if (trackedUsers.has(userId)) {
+        debugLog(`Resetting AFK timer for user ${userId} in ${channelName}`);
+        clearAFKTimer(userId);
+        startAFKTimer(userId, channelId, channelName);
+    }
+}
+
+// Bot event handlers
 client.once('ready', () => {
-    console.log('🏴‍☠️ One Piece Voice Bot is ready to set sail!');
-    console.log(`⚓ Logged in as ${client.user.tag}`);
-    
-    // Initialize AFK Manager
-    afkManager = new AFKManager(client);
-    
-    // Log AFK settings
-    const stats = afkManager.getAFKStats();
-    console.log(`🕒 AFK Timeout: ${stats.timeout} minutes`);
-    console.log(`🛡️ Protected channels: ${stats.excludedChannels.join(', ')}`);
+    log(`One Piece Voice Bot is ready to set sail!`);
+    log(`⚓ Logged in as ${client.user.tag}`);
+    log(`🏴‍☠️ AFK Manager: Started monitoring for inactive pirates...`);
+    log(`⏰ AFK Timeout: ${formatTime(AFK_TIMEOUT)}`);
+    log(`🛡️ Protected Channels: ${AFK_EXCLUDED_CHANNELS.join(', ')}`);
 });
 
 client.on('voiceStateUpdate', async (oldState, newState) => {
-    const createChannelName = process.env.CREATE_CHANNEL_NAME || '🏴‍☠️ Set Sail Together';
-    const categoryName = process.env.CATEGORY_NAME || '🌊 Grand Line Voice Channels';
-    const deleteDelay = parseInt(process.env.DELETE_DELAY) || 5000;
+    const userId = newState.id;
+    const member = newState.member;
 
-    // User joined the "Set Sail Together" channel
-    if (newState.channel && newState.channel.name === createChannelName) {
-        try {
+    try {
+        // Handle user leaving voice
+        if (oldState.channelId && !newState.channelId) {
+            clearAFKTimer(userId);
+            trackedUsers.delete(userId);
+            debugLog(`👋 Stopped tracking user ${userId}`);
+        }
+
+        // Handle user joining voice
+        if (!oldState.channelId && newState.channelId) {
+            const channel = newState.channel;
+            if (channel && channel.name !== CREATE_CHANNEL_NAME) {
+                startAFKTimer(userId, channel.id, channel.name);
+                debugLog(`👁️ Now tracking user ${userId} in channel ${channel.id} (AFK: ${!isProtectedChannel(channel.name)})`);
+            }
+        }
+
+        // Handle user switching channels
+        if (oldState.channelId && newState.channelId && oldState.channelId !== newState.channelId) {
+            const newChannel = newState.channel;
+            if (newChannel && newChannel.name !== CREATE_CHANNEL_NAME) {
+                startAFKTimer(userId, newChannel.id, newChannel.name);
+                debugLog(`👁️ Now tracking user ${userId} in channel ${newChannel.id} (AFK: ${!isProtectedChannel(newChannel.name)})`);
+            } else {
+                clearAFKTimer(userId);
+                trackedUsers.delete(userId);
+            }
+        }
+
+        // Dynamic Voice Channel Creation
+        if (newState.channelId && newState.channel?.name === CREATE_CHANNEL_NAME) {
             const guild = newState.guild;
-            const member = newState.member;
             
             // Find or create category
-            let category = guild.channels.cache.find(c => c.name === categoryName && c.type === ChannelType.GuildCategory);
+            let category = guild.channels.cache.find(c => c.name === CATEGORY_NAME && c.type === ChannelType.GuildCategory);
             if (!category) {
                 category = await guild.channels.create({
-                    name: categoryName,
+                    name: CATEGORY_NAME,
                     type: ChannelType.GuildCategory,
                 });
             }
 
-            // Get random pirate place name
-            const placeName = piratePlaces[Math.floor(Math.random() * piratePlaces.length)];
-            
-            // Create new voice channel
+            // Create new crew channel
+            const crewName = getRandomCrewName();
             const newChannel = await guild.channels.create({
-                name: placeName,
+                name: crewName,
                 type: ChannelType.GuildVoice,
                 parent: category.id,
                 permissionOverwrites: [
@@ -111,128 +244,53 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
 
             // Move user to new channel
             await member.voice.setChannel(newChannel);
-            createdChannels.add(newChannel.id);
+            log(`🚢 Created new crew: ${crewName} for ${member.displayName}`);
 
-            // Send welcome message
-            const generalChannel = guild.channels.cache.find(ch => 
-                ch.type === ChannelType.GuildText && (ch.name.includes('general') || ch.name.includes('chat'))
-            );
-            
-            if (generalChannel) {
-                const embed = new EmbedBuilder()
-                    .setColor('#FF6B35')
-                    .setTitle('🏴‍☠️ New Crew Assembled!')
-                    .setDescription(`**${member.displayName}** has formed a new crew at **${placeName}**!`)
-                    .addFields(
-                        { name: '👑 Captain', value: member.displayName, inline: true },
-                        { name: '🚢 Ship', value: placeName, inline: true }
-                    )
-                    .setFooter({ text: 'Join them on their adventure!' })
-                    .setTimestamp();
-
-                await generalChannel.send({ embeds: [embed] });
-            }
-
-            console.log(`🚢 Created new crew: ${placeName} for ${member.displayName}`);
-
-            // Play random sound effect if sounds folder exists
-            const soundsPath = path.join(__dirname, '..', 'sounds');
-            if (fs.existsSync(soundsPath)) {
-                try {
-                    const soundFiles = fs.readdirSync(soundsPath).filter(file => 
-                        file.endsWith('.mp3') || file.endsWith('.wav') || file.endsWith('.ogg')
-                    );
-                    
-                    if (soundFiles.length > 0) {
-                        const randomSound = soundFiles[Math.floor(Math.random() * soundFiles.length)];
-                        const soundPath = path.join(soundsPath, randomSound);
-                        
-                        const connection = joinVoiceChannel({
-                            channelId: newChannel.id,
-                            guildId: guild.id,
-                            adapterCreator: guild.voiceAdapterCreator,
-                        });
-
-                        const player = createAudioPlayer();
-                        const resource = createAudioResource(soundPath);
-                        
-                        player.play(resource);
-                        connection.subscribe(player);
-
-                        player.on(AudioPlayerStatus.Idle, () => {
-                            connection.destroy();
-                        });
-
-                        setTimeout(() => {
-                            if (connection.state.status !== 'destroyed') {
-                                connection.destroy();
-                            }
-                        }, 10000); // Disconnect after 10 seconds max
-                    }
-                } catch (soundError) {
-                    console.error('🔊 Sound effect error:', soundError);
-                }
-            }
-
-        } catch (error) {
-            console.error('❌ Error creating channel:', error);
+            // Start AFK tracking for the new channel
+            startAFKTimer(userId, newChannel.id, crewName);
         }
-    }
 
-    // Check if a created channel is empty and should be deleted
-    if (oldState.channel && createdChannels.has(oldState.channel.id)) {
-        setTimeout(async () => {
-            try {
-                const channel = oldState.channel;
-                if (channel && channel.members.size === 0) {
-                    console.log(`🗑️ Disbanding empty crew: ${channel.name}`);
-                    createdChannels.delete(channel.id);
-                    await channel.delete();
-                    
-                    // Send dissolution message
-                    const guild = channel.guild;
-                    const generalChannel = guild.channels.cache.find(ch => 
-                        ch.type === ChannelType.GuildText && (ch.name.includes('general') || ch.name.includes('chat'))
-                    );
-                    
-                    if (generalChannel) {
-                        const embed = new EmbedBuilder()
-                            .setColor('#6B73FF')
-                            .setTitle('⚓ Crew Disbanded')
-                            .setDescription(`The crew at **${channel.name}** has disbanded and returned to port.`)
-                            .setFooter({ text: 'Set sail again anytime!' })
-                            .setTimestamp();
-
-                        await generalChannel.send({ embeds: [embed] });
+        // Auto-delete empty dynamic channels
+        if (oldState.channelId) {
+            const oldChannel = oldState.channel;
+            if (oldChannel && 
+                oldChannel.name !== CREATE_CHANNEL_NAME && 
+                oldChannel.parent?.name === CATEGORY_NAME &&
+                oldChannel.members.size === 0) {
+                
+                setTimeout(async () => {
+                    try {
+                        // Double-check it's still empty
+                        const channelToDelete = guild.channels.cache.get(oldChannel.id);
+                        if (channelToDelete && channelToDelete.members.size === 0) {
+                            await channelToDelete.delete();
+                            debugLog(`🗑️ Deleted empty crew: ${oldChannel.name}`);
+                        }
+                    } catch (error) {
+                        console.error(`❌ Error deleting channel ${oldChannel.name}:`, error);
                     }
-                }
-            } catch (error) {
-                console.error('❌ Error deleting channel:', error);
+                }, DELETE_DELAY);
             }
-        }, deleteDelay);
+        }
+
+    } catch (error) {
+        console.error('❌ Error in voiceStateUpdate:', error);
     }
 });
 
-// Command to check AFK stats (for debugging)
-client.on('messageCreate', async (message) => {
-    if (message.content === '!afkstats' && message.member.permissions.has(PermissionFlagsBits.Administrator)) {
-        if (!afkManager) {
-            return message.reply('❌ AFK Manager not initialized');
+// Handle speaking events to reset AFK timers
+client.on('voiceStateUpdate', (oldState, newState) => {
+    // Reset AFK timer when user starts/stops speaking, mutes/unmutes, etc.
+    const userId = newState.id;
+    if (newState.channelId && trackedUsers.has(userId)) {
+        const channelData = trackedUsers.get(userId);
+        if (channelData && !isProtectedChannel(channelData.channelName)) {
+            // Only reset if it's been more than 30 seconds since last reset to avoid spam
+            const timeSinceStart = Date.now() - channelData.startTime;
+            if (timeSinceStart > 30000) { // 30 seconds
+                resetAFKTimer(userId, newState.channelId, channelData.channelName);
+            }
         }
-        
-        const stats = afkManager.getAFKStats();
-        const embed = new EmbedBuilder()
-            .setColor('#FFD700')
-            .setTitle('📊 AFK Manager Statistics')
-            .addFields(
-                { name: '👥 Tracked Users', value: stats.totalTracked.toString(), inline: true },
-                { name: '💤 Currently AFK', value: stats.currentlyAFK.toString(), inline: true },
-                { name: '⏰ Timeout', value: `${stats.timeout} minutes`, inline: true },
-                { name: '🛡️ Protected Channels', value: stats.excludedChannels.join('\n') || 'None', inline: false }
-            )
-            .setTimestamp();
-        
-        await message.reply({ embeds: [embed] });
     }
 });
 
@@ -245,4 +303,20 @@ process.on('unhandledRejection', error => {
     console.error('❌ Unhandled promise rejection:', error);
 });
 
-client.login(process.env.DISCORD_TOKEN);
+process.on('SIGINT', () => {
+    log('🛑 Shutting down bot...');
+    
+    // Clear all timers
+    userTimers.forEach(timer => clearTimeout(timer));
+    userTimers.clear();
+    trackedUsers.clear();
+    
+    client.destroy();
+    process.exit(0);
+});
+
+// Start the bot
+client.login(DISCORD_TOKEN).catch(error => {
+    console.error('❌ Failed to login:', error);
+    process.exit(1);
+});
