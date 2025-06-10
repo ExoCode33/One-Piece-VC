@@ -15,13 +15,6 @@ const CREATE_CHANNEL_NAME = process.env.CREATE_CHANNEL_NAME || '🏴 Set Sail To
 const CATEGORY_NAME = process.env.CATEGORY_NAME || '🌊 Grand Line Voice Channels';
 const DELETE_DELAY = parseInt(process.env.DELETE_DELAY) || 5000;
 const AUDIO_VOLUME = parseFloat(process.env.AUDIO_VOLUME) || 0.4;
-
-// AFK Management Settings (from Railway variables)
-const AFK_TIMEOUT = parseInt(process.env.AFK_TIMEOUT) || 900000; // Default 15 minutes
-const AFK_EXCLUDED_CHANNELS = process.env.AFK_EXCLUDED_CHANNELS 
-    ? process.env.AFK_EXCLUDED_CHANNELS.split(',').map(ch => ch.trim()) 
-    : ['Lofi/Chill']; // Default fallback
-
 const DEBUG = process.env.DEBUG === 'true';
 
 // One Piece themed channel names
@@ -67,9 +60,7 @@ const client = new Client({
     ]
 });
 
-// Track users and their AFK timers
-const userTimers = new Map();
-const trackedUsers = new Map();
+// Track active voice connections for cleanup
 const activeConnections = new Map();
 
 // Sound file path
@@ -88,101 +79,6 @@ function debugLog(message) {
 
 function getRandomCrewName() {
     return CREW_NAMES[Math.floor(Math.random() * CREW_NAMES.length)];
-}
-
-function isProtectedChannel(channelName) {
-    return AFK_EXCLUDED_CHANNELS.some(protected => 
-        channelName.toLowerCase().includes(protected.toLowerCase())
-    );
-}
-
-function formatTime(ms) {
-    const minutes = Math.floor(ms / 60000);
-    const seconds = Math.floor((ms % 60000) / 1000);
-    if (minutes > 0) {
-        return `${minutes} minute${minutes !== 1 ? 's' : ''}${seconds > 0 ? ` ${seconds} second${seconds !== 1 ? 's' : ''}` : ''}`;
-    }
-    return `${seconds} second${seconds !== 1 ? 's' : ''}`;
-}
-
-// AFK Management Functions
-function startAFKTimer(userId, channelId, channelName) {
-    // Don't start timer for protected channels
-    if (isProtectedChannel(channelName)) {
-        debugLog(`Skipping AFK timer for protected channel: ${channelName}`);
-        return;
-    }
-
-    // Clear existing timer if any
-    clearAFKTimer(userId);
-
-    debugLog(`Starting AFK timer for user ${userId} in ${channelName} (${formatTime(AFK_TIMEOUT)})`);
-
-    const timer = setTimeout(async () => {
-        try {
-            const guild = client.guilds.cache.find(g => g.channels.cache.has(channelId));
-            if (!guild) return;
-
-            const member = await guild.members.fetch(userId).catch(() => null);
-            if (!member || !member.voice.channelId) {
-                debugLog(`User ${userId} no longer in voice channel`);
-                return;
-            }
-
-            // Double-check they're still in a non-protected channel
-            const currentChannel = guild.channels.cache.get(member.voice.channelId);
-            if (!currentChannel || isProtectedChannel(currentChannel.name)) {
-                debugLog(`User ${userId} is now in protected channel: ${currentChannel?.name}`);
-                return;
-            }
-
-            // Disconnect the user
-            try {
-                await member.voice.disconnect('AFK timeout - inactive for too long');
-                log(`⏰ Disconnected ${member.displayName} for being AFK (${formatTime(AFK_TIMEOUT)} timeout)`);
-
-                // Send a friendly message
-                try {
-                    await member.send(`🏴‍☠️ Ahoy! You were disconnected from **${currentChannel.name}** for being inactive for ${formatTime(AFK_TIMEOUT)}. The seas await your return, nakama! 🌊`);
-                } catch (dmError) {
-                    debugLog(`Could not send DM to ${member.displayName}: ${dmError.message}`);
-                }
-            } catch (disconnectError) {
-                // User might have already disconnected
-                if (disconnectError.code === 40032) {
-                    debugLog(`User ${member.displayName} already disconnected`);
-                } else {
-                    console.error(`❌ Error disconnecting user ${userId}:`, disconnectError);
-                }
-            }
-
-        } catch (error) {
-            console.error(`❌ Error handling AFK timeout for user ${userId}:`, error);
-        } finally {
-            userTimers.delete(userId);
-            trackedUsers.delete(userId);
-        }
-    }, AFK_TIMEOUT);
-
-    userTimers.set(userId, timer);
-    trackedUsers.set(userId, { channelId, channelName, startTime: Date.now() });
-}
-
-function clearAFKTimer(userId) {
-    const timer = userTimers.get(userId);
-    if (timer) {
-        clearTimeout(timer);
-        userTimers.delete(userId);
-        debugLog(`Cleared AFK timer for user ${userId}`);
-    }
-}
-
-function resetAFKTimer(userId, channelId, channelName) {
-    if (trackedUsers.has(userId)) {
-        debugLog(`Resetting AFK timer for user ${userId} in ${channelName}`);
-        clearAFKTimer(userId);
-        startAFKTimer(userId, channelId, channelName);
-    }
 }
 
 // Sound playing function
@@ -252,9 +148,7 @@ async function playWelcomeSound(channel) {
 client.once('ready', () => {
     log(`One Piece Voice Bot is ready to set sail!`);
     log(`⚓ Logged in as ${client.user.tag}`);
-    log(`🏴‍☠️ AFK Manager: Started monitoring for inactive pirates...`);
-    log(`⏰ AFK Timeout: ${formatTime(AFK_TIMEOUT)}`);
-    log(`🛡️ Protected Channels: ${AFK_EXCLUDED_CHANNELS.join(', ')}`);
+    log(`🏴‍☠️ AFK Management: DISABLED (use AFKManager.js if needed)`);
 });
 
 client.on('voiceStateUpdate', async (oldState, newState) => {
@@ -262,34 +156,6 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
     const member = newState.member;
 
     try {
-        // Handle user leaving voice
-        if (oldState.channelId && !newState.channelId) {
-            clearAFKTimer(userId);
-            trackedUsers.delete(userId);
-            debugLog(`👋 Stopped tracking user ${userId}`);
-        }
-
-        // Handle user joining voice
-        if (!oldState.channelId && newState.channelId) {
-            const channel = newState.channel;
-            if (channel && channel.name !== CREATE_CHANNEL_NAME) {
-                startAFKTimer(userId, channel.id, channel.name);
-                debugLog(`👁️ Now tracking user ${userId} in channel ${channel.id} (AFK: ${!isProtectedChannel(channel.name)})`);
-            }
-        }
-
-        // Handle user switching channels
-        if (oldState.channelId && newState.channelId && oldState.channelId !== newState.channelId) {
-            const newChannel = newState.channel;
-            if (newChannel && newChannel.name !== CREATE_CHANNEL_NAME) {
-                startAFKTimer(userId, newChannel.id, newChannel.name);
-                debugLog(`👁️ Now tracking user ${userId} in channel ${newChannel.id} (AFK: ${!isProtectedChannel(newChannel.name)})`);
-            } else {
-                clearAFKTimer(userId);
-                trackedUsers.delete(userId);
-            }
-        }
-
         // Dynamic Voice Channel Creation
         if (newState.channelId && newState.channel?.name === CREATE_CHANNEL_NAME) {
             const guild = newState.guild;
@@ -357,9 +223,6 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
                     setTimeout(() => {
                         playWelcomeSound(newChannel);
                     }, 1000); // Small delay to ensure user is properly connected
-
-                    // Start AFK tracking for the new channel
-                    startAFKTimer(userId, newChannel.id, crewName);
                 } else {
                     // User disconnected before we could move them, clean up the channel
                     debugLog(`User ${member.displayName} disconnected before move, cleaning up channel`);
@@ -425,22 +288,6 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
     }
 });
 
-// Handle speaking events to reset AFK timers
-client.on('voiceStateUpdate', (oldState, newState) => {
-    // Reset AFK timer when user starts/stops speaking, mutes/unmutes, etc.
-    const userId = newState.id;
-    if (newState.channelId && trackedUsers.has(userId)) {
-        const channelData = trackedUsers.get(userId);
-        if (channelData && !isProtectedChannel(channelData.channelName)) {
-            // Only reset if it's been more than 30 seconds since last reset to avoid spam
-            const timeSinceStart = Date.now() - channelData.startTime;
-            if (timeSinceStart > 30000) { // 30 seconds
-                resetAFKTimer(userId, newState.channelId, channelData.channelName);
-            }
-        }
-    }
-});
-
 // Error handling
 client.on('error', error => {
     console.error('❌ Discord client error:', error);
@@ -452,11 +299,6 @@ process.on('unhandledRejection', error => {
 
 process.on('SIGINT', () => {
     log('🛑 Shutting down bot...');
-    
-    // Clear all timers
-    userTimers.forEach(timer => clearTimeout(timer));
-    userTimers.clear();
-    trackedUsers.clear();
     
     // Clean up voice connections
     activeConnections.forEach(connection => connection.destroy());
