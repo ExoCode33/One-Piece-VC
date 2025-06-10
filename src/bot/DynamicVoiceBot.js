@@ -297,16 +297,22 @@ async function playAudio(channel, member) {
         voiceConnections.set(connectionKey, connection);
         console.log(`💾 Stored voice connection with key: ${connectionKey}`);
 
-        // IMMEDIATE cleanup timer - no matter what happens, bot leaves in 5 seconds
-        console.log(`⏰ Setting IMMEDIATE 5-second cleanup timer for ${channelName}`);
-        setTimeout(() => {
+        // IMMEDIATE cleanup timer setup - debug this heavily
+        console.log(`⏰ About to set IMMEDIATE 5-second cleanup timer for ${channelName}`);
+        console.log(`🔍 Connection key: ${connectionKey}`);
+        console.log(`🔍 Channel ID: ${channelId}`);
+        console.log(`🔍 Guild ID: ${guildId}`);
+        
+        const cleanupTimer = setTimeout(() => {
             console.log(`🚨 5 SECONDS UP! Force disconnecting from ${channelName}`);
             console.log(`🔍 About to destroy connection for key: ${connectionKey}`);
+            console.log(`🔍 Connection exists in map: ${voiceConnections.has(connectionKey)}`);
+            console.log(`🔍 Player exists in map: ${audioPlayers.has(connectionKey)}`);
             
             try {
                 if (voiceConnections.has(connectionKey)) {
                     const conn = voiceConnections.get(connectionKey);
-                    console.log(`🔌 Destroying connection...`);
+                    console.log(`🔌 Destroying connection... Status: ${conn.state.status}`);
                     conn.destroy();
                     voiceConnections.delete(connectionKey);
                     console.log(`✅ Connection destroyed and removed`);
@@ -327,8 +333,16 @@ async function playAudio(channel, member) {
                 console.log(`✅ CLEANUP COMPLETED for ${channelName}`);
             } catch (error) {
                 console.error(`❌ Error in cleanup: ${error.message}`);
+                console.error(`❌ Error stack: ${error.stack}`);
             }
-        }, 5000); // Simple 5-second timer
+        }, 5000);
+        
+        console.log(`✅ Timer created and will fire in 5 seconds`);
+        console.log(`🔍 Timer object: ${cleanupTimer ? 'exists' : 'null'}`);
+        
+        // Store the timer reference
+        cleanupTimers.set(connectionKey, cleanupTimer);
+        console.log(`💾 Timer stored in map with key: ${connectionKey}`);
 
         connection.on(VoiceConnectionStatus.Ready, () => {
             console.log('✅ Voice connection is ready!');
