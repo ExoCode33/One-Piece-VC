@@ -178,78 +178,99 @@ class DynamicVoiceBot {
                 adapterCreator: guild.voiceAdapterCreator,
             });
 
-            this.audioConnections.set(`${guild.id}-${channel.id}`, connection);
+            const connectionKey = `${guild.id}-${channel.id}`;
+            this.audioConnections.set(connectionKey, connection);
 
             return new Promise((resolve) => {
+                let hasStartedPlaying = false;
+                let timeoutId = null;
+
+                // Create the cleanup function
+                const cleanup = () => {
+                    if (timeoutId) clearTimeout(timeoutId);
+                    if (this.audioConnections.has(connectionKey)) {
+                        connection.destroy();
+                        this.audioConnections.delete(connectionKey);
+                        console.log(`⚓ Disconnected from ${channel.name}`);
+                    }
+                    resolve();
+                };
+
+                // Set maximum timeout (30 seconds)
+                timeoutId = setTimeout(() => {
+                    console.log(`⏰ Audio timeout after 30 seconds - disconnecting from ${channel.name}`);
+                    cleanup();
+                }, 30000);
+
                 // Handle connection ready
                 connection.on(VoiceConnectionStatus.Ready, () => {
-                    console.log(`🎤 Bot connected to ${channel.name} - Playing Going Merry sound! ⚓`);
+                    console.log(`🎤 Bot connected to ${channel.name} - Preparing to play Going Merry sound! ⚓`);
                     
                     try {
                         // Create audio player and resource with FFmpeg
                         const player = createAudioPlayer();
                         
                         // Create audio resource with FFmpeg path if available
-                        const resourceOptions = {};
+                        const resourceOptions = {
+                            inlineVolume: true
+                        };
                         if (ffmpegPath) {
                             resourceOptions.inputType = voiceModule.StreamType.Arbitrary;
                         }
                         
                         const resource = createAudioResource('./sounds/The Going Merry One Piece - Cut.mp3', resourceOptions);
                         
-                        // Play the sound
-                        player.play(resource);
-                        connection.subscribe(player);
+                        // Subscribe the connection to the player
+                        const subscription = connection.subscribe(player);
                         
-                        console.log(`🎶 🚢 Playing: The Going Merry One Piece - Cut! ⚓`);
-                        
-                        // Handle player events
+                        // Handle player events BEFORE playing
                         player.on(AudioPlayerStatus.Playing, () => {
-                            console.log(`🎵 Going Merry sound is now playing!`);
+                            hasStartedPlaying = true;
+                            console.log(`🎵 Going Merry sound is now playing! 🚢`);
                         });
                         
                         player.on(AudioPlayerStatus.Idle, () => {
-                            console.log(`🎵 Going Merry sound finished playing`);
-                            // Disconnect ONLY after sound finishes completely
-                            setTimeout(() => {
-                                connection.destroy();
-                                this.audioConnections.delete(`${guild.id}-${channel.id}`);
-                                console.log(`⚓ Disconnected from ${channel.name} after sound finished`);
-                                resolve();
-                            }, 1000); // 1 second buffer after sound ends
+                            if (hasStartedPlaying) {
+                                console.log(`🎵 Going Merry sound finished playing completely!`);
+                                // Wait 2 seconds after sound ends before disconnecting
+                                setTimeout(() => {
+                                    cleanup();
+                                }, 2000);
+                            }
                         });
                         
                         player.on('error', (error) => {
                             console.error(`🎵 Audio player error:`, error);
-                            connection.destroy();
-                            this.audioConnections.delete(`${guild.id}-${channel.id}`);
-                            resolve();
+                            cleanup();
                         });
+
+                        // Start playing the sound
+                        player.play(resource);
+                        console.log(`🎶 🚢 Started playing: The Going Merry One Piece - Cut! ⚓`);
+                        
+                        // If subscription fails, cleanup
+                        if (!subscription) {
+                            console.log(`⚠️ Failed to subscribe player to connection`);
+                            cleanup();
+                        }
                         
                     } catch (audioError) {
                         console.log(`⚠️ Could not play audio file: ${audioError.message}`);
-                        connection.destroy();
-                        this.audioConnections.delete(`${guild.id}-${channel.id}`);
-                        resolve();
+                        cleanup();
                     }
                 });
 
                 // Handle connection errors
                 connection.on('error', (error) => {
                     console.error(`🎤 Voice connection error:`, error);
-                    this.audioConnections.delete(`${guild.id}-${channel.id}`);
-                    resolve();
+                    cleanup();
                 });
 
-                // Timeout fallback - disconnect after 30 seconds max
-                setTimeout(() => {
-                    if (this.audioConnections.has(`${guild.id}-${channel.id}`)) {
-                        console.log(`⏰ Audio timeout - disconnecting from ${channel.name}`);
-                        connection.destroy();
-                        this.audioConnections.delete(`${guild.id}-${channel.id}`);
-                        resolve();
-                    }
-                }, 30000);
+                // Handle disconnect
+                connection.on(VoiceConnectionStatus.Disconnected, () => {
+                    console.log(`🎤 Bot disconnected from ${channel.name}`);
+                    cleanup();
+                });
             });
 
         } catch (error) {
