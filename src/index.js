@@ -103,13 +103,12 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
                 }
             }
 
-            // Create new voice channel
+            // Create new voice channel right below the trigger channel
             const randomName = onePieceLocations[Math.floor(Math.random() * onePieceLocations.length)];
             const newChannel = await guild.channels.create({
                 name: randomName,
                 type: ChannelType.GuildVoice,
                 parent: category.id,
-                position: newState.channel.position + 1, // Position right below the trigger channel
                 permissionOverwrites: [
                     {
                         id: member.id,
@@ -122,6 +121,9 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
                     }
                 ]
             });
+
+            // Move the new channel to be directly below the trigger channel
+            await newChannel.setPosition(newState.channel.position + 1);
 
             console.log(`✅ Channel created: ${newChannel.name}`);
 
@@ -144,7 +146,7 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
         oldState.channel.name !== createChannelName &&
         oldState.channel.members.size === 0) {
         
-        console.log(`🧹 Cleaning up empty channel: ${oldState.channel.name}`);
+        console.log(`🧹 Channel empty: ${oldState.channel.name} - deleting in 1 second`);
         
         setTimeout(async () => {
             try {
@@ -155,7 +157,7 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
             } catch (error) {
                 console.error('❌ Error deleting channel:', error);
             }
-        }, deleteDelay);
+        }, 1000); // Changed to 1 second
     }
 });
 
