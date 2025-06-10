@@ -1,13 +1,9 @@
 [phases.setup]
-nixPkgs = ["nodejs_18", "python3", "pkg-config", "libtool", "autoconf", "automake", "gcc", "gnumake", "libsodium", "ffmpeg", "libopus"]
+nixPkgs = ["nodejs_18", "ffmpeg", "python3"]
 
 [phases.install]
 cmds = [
-  "export PYTHON=python3",
-  "npm config set python python3", 
-  "npm install --no-optional --ignore-scripts",
-  "npm install opusscript --save",
-  "npm rebuild @discordjs/opus --build-from-source || echo 'Opus rebuild failed, continuing with opusscript'"
+  "PYTHON=python3 npm install --no-optional"
 ]
 
 [start]
