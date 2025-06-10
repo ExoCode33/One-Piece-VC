@@ -260,14 +260,74 @@ async function playAudio(channel, member) {
 
                 player.on(AudioPlayerStatus.Idle, () => {
                     console.log(`🎵 Audio finished playing in ${channel.name}`);
+                    console.log(`🔌 Disconnecting bot from ${channel.name}...`);
+                    
+                    // Disconnect the bot after audio finishes
+                    setTimeout(() => {
+                        try {
+                            if (voiceConnections.has(connectionKey)) {
+                                const conn = voiceConnections.get(connectionKey);
+                                conn.destroy();
+                                voiceConnections.delete(connectionKey);
+                                console.log(`✅ Bot disconnected from ${channel.name}`);
+                            }
+                            
+                            if (audioPlayers.has(connectionKey)) {
+                                audioPlayers.delete(connectionKey);
+                            }
+                        } catch (error) {
+                            console.error('❌ Error disconnecting:', error);
+                        }
+                    }, 1000); // Small delay to ensure audio finished cleanly
                 });
 
                 player.on('error', error => {
                     console.error('❌ Audio player error:', error);
+                    // Also disconnect on error
+                    setTimeout(() => {
+                        try {
+                            if (voiceConnections.has(connectionKey)) {
+                                const conn = voiceConnections.get(connectionKey);
+                                conn.destroy();
+                                voiceConnections.delete(connectionKey);
+                            }
+                            if (audioPlayers.has(connectionKey)) {
+                                audioPlayers.delete(connectionKey);
+                            }
+                        } catch (err) {
+                            console.error('❌ Error cleaning up after audio error:', err);
+                        }
+                    }, 500);
                 });
+
+                // Safety timeout - disconnect after 60 seconds max
+                setTimeout(() => {
+                    if (voiceConnections.has(connectionKey)) {
+                        console.log(`⏰ Maximum audio time reached, disconnecting from ${channel.name}`);
+                        try {
+                            const conn = voiceConnections.get(connectionKey);
+                            conn.destroy();
+                            voiceConnections.delete(connectionKey);
+                            audioPlayers.delete(connectionKey);
+                        } catch (error) {
+                            console.error('❌ Error in safety timeout disconnect:', error);
+                        }
+                    }
+                }, 60000); // 60 seconds maximum
 
             } catch (audioError) {
                 console.error('❌ Error setting up audio:', audioError);
+                // Clean up on setup error
+                setTimeout(() => {
+                    try {
+                        if (voiceConnections.has(connectionKey)) {
+                            connection.destroy();
+                            voiceConnections.delete(connectionKey);
+                        }
+                    } catch (err) {
+                        console.error('❌ Error cleaning up after setup error:', err);
+                    }
+                }, 500);
             }
         });
 
@@ -277,10 +337,22 @@ async function playAudio(channel, member) {
 
         connection.on(VoiceConnectionStatus.Disconnected, () => {
             console.log(`🔌 Disconnected from voice channel: ${channel.name}`);
+            // Clean up when disconnected
+            voiceConnections.delete(connectionKey);
+            audioPlayers.delete(connectionKey);
         });
 
         connection.on('error', error => {
             console.error('❌ Voice connection error:', error);
+            // Clean up on connection error
+            setTimeout(() => {
+                try {
+                    voiceConnections.delete(connectionKey);
+                    audioPlayers.delete(connectionKey);
+                } catch (err) {
+                    console.error('❌ Error cleaning up after connection error:', err);
+                }
+            }, 500);
         });
 
     } catch (error) {
