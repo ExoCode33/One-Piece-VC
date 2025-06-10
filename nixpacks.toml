@@ -1,9 +1,9 @@
 [phases.setup]
-nixPkgs = ["nodejs_18", "ffmpeg", "python3", "libsodium", "pkg-config", "gcc"]
+nixPkgs = ["nodejs_18", "ffmpeg", "python3"]
 
 [phases.install]
 cmds = [
-  "PYTHON=python3 npm install --no-optional --legacy-peer-deps"
+  "PYTHON=python3 npm install --omit=optional --legacy-peer-deps"
 ]
 
 [start]
