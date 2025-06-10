@@ -4,18 +4,15 @@
   "description": "A One Piece themed Discord bot that dynamically creates and manages voice channels with authentic sound effects",
   "main": "src/index.js",
   "scripts": {
-    "start": "node src/index.js",
-    "postinstall": "echo '🏴‍☠️ One Piece Bot ready to set sail with audio!'"
+    "start": "node src/index.js"
   },
   "author": "ExoCode33",
   "license": "MIT",
   "dependencies": {
     "discord.js": "14.14.1",
     "dotenv": "16.3.1",
-    "@discordjs/voice": "0.16.1"
-  },
-  "optionalDependencies": {
-    "sodium": "3.0.2"
+    "@discordjs/voice": "0.16.1",
+    "prism-media": "1.3.5"
   },
   "engines": {
     "node": ">=16.0.0"
