@@ -335,6 +335,16 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
                 ]
             });
 
+            // Force move to category if it didn't work
+            if (newChannel.parentId !== category.id) {
+                try {
+                    await newChannel.setParent(category.id);
+                    debugLog(`🔧 Manually moved ${crewName} to category ${category.name}`);
+                } catch (moveError) {
+                    console.error(`❌ Error moving channel to category:`, moveError);
+                }
+            }
+
             log(`🚢 Created new crew: ${crewName} for ${member.displayName} in category ${category.name}`);
 
             // Move user to new channel with error handling
