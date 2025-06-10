@@ -2,19 +2,13 @@ const { Client, GatewayIntentBits, ChannelType, PermissionFlagsBits } = require(
 const config = require('../../config/config');
 const { onePieceChannels } = require('../../config/channels');
 
-// Optimized voice module loading
+// Try to import voice module
 let voiceModule = null;
-let hasVoiceSupport = false;
-
-async function loadVoiceModule() {
-    try {
-        voiceModule = await import('@discordjs/voice');
-        hasVoiceSupport = true;
-        console.log('🎵 Voice module loaded successfully!');
-    } catch (error) {
-        console.log('⚠️ Voice module not available, running without audio');
-        hasVoiceSupport = false;
-    }
+try {
+    voiceModule = require('@discordjs/voice');
+    console.log('🎵 Voice module loaded successfully!');
+} catch (error) {
+    console.log('⚠️ Voice module not available, running without audio');
 }
 
 class DynamicVoiceBot {
@@ -30,21 +24,16 @@ class DynamicVoiceBot {
         this.deleteTimers = new Map();
         this.usedChannelNames = new Set();
         this.audioConnections = new Map();
-        this.hasVoiceSupport = hasVoiceSupport;
+        this.hasVoiceSupport = !!voiceModule;
         
         this.setupEventListeners();
     }
 
     setupEventListeners() {
-        this.client.once('ready', async () => {
+        this.client.once('ready', () => {
             console.log(`✅ Pirate Bot is ready! Logged in as ${this.client.user.tag} 🏴‍☠️`);
             console.log(`⚓ Create channel name: "${config.createChannelName}"`);
-            
-            // Load voice module after bot is ready
-            await loadVoiceModule();
-            this.hasVoiceSupport = hasVoiceSupport;
             console.log(`🎵 Audio support: ${this.hasVoiceSupport ? 'ENABLED' : 'DISABLED'}`);
-            
             this.setupGuilds();
         });
 
@@ -84,7 +73,6 @@ class DynamicVoiceBot {
             );
 
             if (!createChannel) {
-                // Only create if it doesn't exist
                 createChannel = await guild.channels.create({
                     name: config.createChannelName,
                     type: ChannelType.GuildVoice,
@@ -96,7 +84,7 @@ class DynamicVoiceBot {
                         }
                     ]
                 });
-                console.log(`⚓ Created new join channel in Community category: ${config.createChannelName}`);
+                console.log(`⚓ Created new join channel: ${config.createChannelName}`);
             } else {
                 console.log(`⚓ Using existing join channel: ${config.createChannelName}`);
             }
@@ -169,7 +157,7 @@ class DynamicVoiceBot {
         }
 
         try {
-            console.log(`🎵 Playing The Going Merry welcome sound...`);
+            console.log(`🎵 Playing The Going Merry welcome sound in ${channel.name}...`);
             
             const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, VoiceConnectionStatus } = voiceModule;
             
@@ -180,59 +168,71 @@ class DynamicVoiceBot {
                 adapterCreator: guild.voiceAdapterCreator,
             });
 
-            this.audioConnections.set(guild.id, connection);
+            this.audioConnections.set(`${guild.id}-${channel.id}`, connection);
 
-            // Wait for connection to be ready
-            connection.on(VoiceConnectionStatus.Ready, () => {
-                console.log(`🎤 Bot connected to ${channel.name} - Playing Going Merry sound! ⚓`);
-                
-                try {
-                    // Create audio player and resource
-                    const player = createAudioPlayer();
-                    const resource = createAudioResource('./sounds/The Going Merry One Piece - Cut.mp3');
+            return new Promise((resolve) => {
+                // Handle connection ready
+                connection.on(VoiceConnectionStatus.Ready, () => {
+                    console.log(`🎤 Bot connected to ${channel.name} - Playing Going Merry sound! ⚓`);
                     
-                    // Play the sound
-                    player.play(resource);
-                    connection.subscribe(player);
-                    
-                    console.log(`🎶 🚢 Playing: The Going Merry One Piece - Cut! ⚓`);
-                    
-                    // Handle player events
-                    player.on(AudioPlayerStatus.Playing, () => {
-                        console.log(`🎵 Going Merry sound is now playing!`);
-                    });
-                    
-                    player.on(AudioPlayerStatus.Idle, () => {
-                        console.log(`🎵 Going Merry sound finished playing`);
-                        // Disconnect after sound finishes
-                        setTimeout(() => {
-                            if (this.audioConnections.has(guild.id)) {
+                    try {
+                        // Create audio player and resource
+                        const player = createAudioPlayer();
+                        const resource = createAudioResource('./sounds/The Going Merry One Piece - Cut.mp3');
+                        
+                        // Play the sound
+                        player.play(resource);
+                        connection.subscribe(player);
+                        
+                        console.log(`🎶 🚢 Playing: The Going Merry One Piece - Cut! ⚓`);
+                        
+                        // Handle player events
+                        player.on(AudioPlayerStatus.Playing, () => {
+                            console.log(`🎵 Going Merry sound is now playing!`);
+                        });
+                        
+                        player.on(AudioPlayerStatus.Idle, () => {
+                            console.log(`🎵 Going Merry sound finished playing`);
+                            // Disconnect ONLY after sound finishes completely
+                            setTimeout(() => {
                                 connection.destroy();
-                                this.audioConnections.delete(guild.id);
-                                console.log(`⚓ Disconnected from voice channel`);
-                            }
-                        }, 1000);
-                    });
-                    
-                    player.on('error', (error) => {
-                        console.error(`🎵 Audio player error:`, error);
+                                this.audioConnections.delete(`${guild.id}-${channel.id}`);
+                                console.log(`⚓ Disconnected from ${channel.name} after sound finished`);
+                                resolve();
+                            }, 1000); // 1 second buffer after sound ends
+                        });
+                        
+                        player.on('error', (error) => {
+                            console.error(`🎵 Audio player error:`, error);
+                            connection.destroy();
+                            this.audioConnections.delete(`${guild.id}-${channel.id}`);
+                            resolve();
+                        });
+                        
+                    } catch (audioError) {
+                        console.log(`⚠️ Could not play audio file: ${audioError.message}`);
                         connection.destroy();
-                        this.audioConnections.delete(guild.id);
-                    });
-                    
-                } catch (audioError) {
-                    console.log(`⚠️ Could not play audio file: ${audioError.message}`);
-                    // Disconnect if audio fails
-                    setTimeout(() => {
-                        connection.destroy();
-                        this.audioConnections.delete(guild.id);
-                    }, 2000);
-                }
-            });
+                        this.audioConnections.delete(`${guild.id}-${channel.id}`);
+                        resolve();
+                    }
+                });
 
-            connection.on('error', (error) => {
-                console.error(`🎤 Voice connection error:`, error);
-                this.audioConnections.delete(guild.id);
+                // Handle connection errors
+                connection.on('error', (error) => {
+                    console.error(`🎤 Voice connection error:`, error);
+                    this.audioConnections.delete(`${guild.id}-${channel.id}`);
+                    resolve();
+                });
+
+                // Timeout fallback - disconnect after 30 seconds max
+                setTimeout(() => {
+                    if (this.audioConnections.has(`${guild.id}-${channel.id}`)) {
+                        console.log(`⏰ Audio timeout - disconnecting from ${channel.name}`);
+                        connection.destroy();
+                        this.audioConnections.delete(`${guild.id}-${channel.id}`);
+                        resolve();
+                    }
+                }, 30000);
             });
 
         } catch (error) {
@@ -284,7 +284,6 @@ class DynamicVoiceBot {
                 console.log(`📁 Created ${channelName} in Community category`);
             } catch (categoryError) {
                 console.log(`⚠️ Cannot create in Community category, trying without category...`);
-                // Fallback: create without category
                 newChannel = await guild.channels.create({
                     name: channelName,
                     type: ChannelType.GuildVoice,
@@ -324,10 +323,10 @@ class DynamicVoiceBot {
 
             console.log(`🏴‍☠️ NEW PIRATE CREW FORMED: ${channelName} - Captain ${member.user.tag}! ⚓`);
 
-            // NOW play the welcome sound in the NEW channel
+            // NOW play the welcome sound in the NEW channel and WAIT for it to finish
             setTimeout(async () => {
                 await this.playJoinSound(newChannel, guild);
-            }, 1000); // Small delay to ensure user is moved
+            }, 1000); // 1 second delay to ensure user is moved
 
         } catch (error) {
             console.error(`❌ Failed to create pirate crew for ${member.user.tag}:`, error);
