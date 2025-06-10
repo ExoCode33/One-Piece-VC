@@ -1,0 +1,8 @@
+[phases.setup]
+nixPkgs = ["nodejs_18", "python3", "pkg-config", "libtool", "autoconf", "automake", "gcc", "make", "libsodium"]
+
+[phases.install]
+cmds = ["npm ci --only=production --ignore-scripts", "npm rebuild --build-from-source"]
+
+[start]
+cmd = "npm start"
