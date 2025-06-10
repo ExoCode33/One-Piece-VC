@@ -137,14 +137,23 @@ function startAFKTimer(userId, channelId, channelName) {
             }
 
             // Disconnect the user
-            await member.voice.disconnect('AFK timeout - inactive for too long');
-            log(`⏰ Disconnected ${member.displayName} for being AFK (${formatTime(AFK_TIMEOUT)} timeout)`);
-
-            // Send a friendly message
             try {
-                await member.send(`🏴‍☠️ Ahoy! You were disconnected from **${currentChannel.name}** for being inactive for ${formatTime(AFK_TIMEOUT)}. The seas await your return, nakama! 🌊`);
-            } catch (dmError) {
-                debugLog(`Could not send DM to ${member.displayName}: ${dmError.message}`);
+                await member.voice.disconnect('AFK timeout - inactive for too long');
+                log(`⏰ Disconnected ${member.displayName} for being AFK (${formatTime(AFK_TIMEOUT)} timeout)`);
+
+                // Send a friendly message
+                try {
+                    await member.send(`🏴‍☠️ Ahoy! You were disconnected from **${currentChannel.name}** for being inactive for ${formatTime(AFK_TIMEOUT)}. The seas await your return, nakama! 🌊`);
+                } catch (dmError) {
+                    debugLog(`Could not send DM to ${member.displayName}: ${dmError.message}`);
+                }
+            } catch (disconnectError) {
+                // User might have already disconnected
+                if (disconnectError.code === 40032) {
+                    debugLog(`User ${member.displayName} already disconnected`);
+                } else {
+                    console.error(`❌ Error disconnecting user ${userId}:`, disconnectError);
+                }
             }
 
         } catch (error) {
@@ -285,6 +294,12 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
         if (newState.channelId && newState.channel?.name === CREATE_CHANNEL_NAME) {
             const guild = newState.guild;
             
+            // Additional check to make sure user is still connected
+            if (!member.voice.channelId) {
+                debugLog(`User ${member.displayName} no longer in voice, skipping channel creation`);
+                return;
+            }
+            
             // Find or create category - look for exact match first
             let category = guild.channels.cache.find(c => 
                 c.name === CATEGORY_NAME && c.type === ChannelType.GuildCategory
@@ -322,16 +337,47 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
 
             log(`🚢 Created new crew: ${crewName} for ${member.displayName} in category ${category.name}`);
 
-            // Move user to new channel
-            await member.voice.setChannel(newChannel);
+            // Move user to new channel with error handling
+            try {
+                // Check if user is still connected to voice
+                if (member.voice.channelId) {
+                    await member.voice.setChannel(newChannel);
+                    
+                    // Play welcome sound after successful move
+                    setTimeout(() => {
+                        playWelcomeSound(newChannel);
+                    }, 1000); // Small delay to ensure user is properly connected
 
-            // Play welcome sound
-            setTimeout(() => {
-                playWelcomeSound(newChannel);
-            }, 1000); // Small delay to ensure user is properly connected
-
-            // Start AFK tracking for the new channel
-            startAFKTimer(userId, newChannel.id, crewName);
+                    // Start AFK tracking for the new channel
+                    startAFKTimer(userId, newChannel.id, crewName);
+                } else {
+                    // User disconnected before we could move them, clean up the channel
+                    debugLog(`User ${member.displayName} disconnected before move, cleaning up channel`);
+                    setTimeout(async () => {
+                        try {
+                            if (newChannel.members.size === 0) {
+                                await newChannel.delete();
+                                debugLog(`🗑️ Cleaned up unused crew: ${crewName}`);
+                            }
+                        } catch (cleanupError) {
+                            console.error(`❌ Error cleaning up channel:`, cleanupError);
+                        }
+                    }, 1000);
+                }
+            } catch (moveError) {
+                console.error(`❌ Error moving user to new channel:`, moveError);
+                // Clean up the channel if move failed
+                setTimeout(async () => {
+                    try {
+                        if (newChannel.members.size === 0) {
+                            await newChannel.delete();
+                            debugLog(`🗑️ Cleaned up failed crew: ${crewName}`);
+                        }
+                    } catch (cleanupError) {
+                        console.error(`❌ Error cleaning up channel:`, cleanupError);
+                    }
+                }, 1000);
+            }
         }
 
         // Auto-delete empty dynamic channels
