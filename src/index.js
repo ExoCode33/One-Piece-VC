@@ -31,17 +31,14 @@ const onePieceLocations = [
     "🏴‍☠️ Alabasta Adventure"
 ];
 
-// Store active connections with cleanup timers
+// Store active connections
 const voiceConnections = new Map();
 const audioPlayers = new Map();
-const cleanupTimers = new Map();
-// Force deployment update - June 9, 2025 - FINAL VERSION
 
 // Audio file path
 const audioFilePath = path.join(__dirname, '..', 'sounds', 'The Going Merry One Piece - Cut.ogg');
 
 client.once('ready', () => {
-    console.log('🚨 THIS IS THE NEW VERSION - TIMER SHOULD WORK');
     console.log(`🏴‍☠️ ${client.user.tag} is ready to sail the Grand Line!`);
     console.log(`📊 Serving ${client.guilds.cache.size} servers`);
     console.log(`🔧 Environment: ${process.env.NODE_ENV || 'development'}`);
@@ -83,269 +80,142 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
     console.log(`User: ${newState.member?.displayName || 'Unknown'}`);
     console.log(`Old Channel: ${oldState.channel?.name || 'None'}`);
     console.log(`New Channel: ${newState.channel?.name || 'None'}`);
-    console.log(`Looking for channel named: "${createChannelName}"`);
 
-    // User joined a channel
-    if (newState.channel) {
-        console.log(`✅ User joined: "${newState.channel.name}"`);
-        console.log(`🔍 Checking if "${newState.channel.name}" === "${createChannelName}"`);
+    // User joined the trigger channel
+    if (newState.channel && newState.channel.name === createChannelName) {
+        console.log('🎯 User joined the create channel!');
         
-        if (newState.channel.name === createChannelName) {
-            console.log('🎯 MATCH! User joined the create channel!');
+        try {
+            const guild = newState.guild;
+            const member = newState.member;
             
-            try {
-                const guild = newState.guild;
-                const member = newState.member;
-                
-                console.log(`🏴‍☠️ Creating new crew for ${member.displayName}...`);
-                
-                // Check if user is in a category and use that, otherwise find/create our category
-                let category;
-                const userCurrentCategory = newState.channel.parent;
-                
-                if (userCurrentCategory) {
-                    console.log(`📂 User is in category: "${userCurrentCategory.name}"`);
-                    console.log(`🤔 Should we use this category or create our own?`);
-                    
-                    // Use the same category as the trigger channel
-                    category = userCurrentCategory;
-                    console.log(`✅ Using existing category: "${category.name}"`);
-                } else {
-                    // Find or create our category
-                    category = guild.channels.cache.find(c => c.name === categoryName && c.type === ChannelType.GuildCategory);
-                    if (!category) {
-                        console.log(`📁 Creating category: ${categoryName}`);
-                        category = await guild.channels.create({
-                            name: categoryName,
-                            type: ChannelType.GuildCategory,
-                        });
-                    } else {
-                        console.log(`📁 Found existing category: ${categoryName}`);
-                    }
+            console.log(`🏴‍☠️ Creating new crew for ${member.displayName}...`);
+            
+            // Find or create category
+            let category = newState.channel.parent;
+            if (!category) {
+                category = guild.channels.cache.find(c => c.name === categoryName && c.type === ChannelType.GuildCategory);
+                if (!category) {
+                    category = await guild.channels.create({
+                        name: categoryName,
+                        type: ChannelType.GuildCategory,
+                    });
                 }
-
-                // Create new voice channel
-                const randomName = onePieceLocations[Math.floor(Math.random() * onePieceLocations.length)];
-                console.log(`🚢 Creating channel: ${randomName} in category: ${category.name}`);
-                
-                const newChannel = await guild.channels.create({
-                    name: randomName,
-                    type: ChannelType.GuildVoice,
-                    parent: category.id,
-                    permissionOverwrites: [
-                        {
-                            id: member.id,
-                            allow: [
-                                PermissionFlagsBits.ManageChannels,
-                                PermissionFlagsBits.MoveMembers,
-                                PermissionFlagsBits.MuteMembers,
-                                PermissionFlagsBits.DeafenMembers
-                            ]
-                        }
-                    ]
-                });
-
-                console.log(`✅ Channel created successfully: ${newChannel.name}`);
-
-                // Move user to new channel
-                console.log(`🔄 Moving ${member.displayName} to new channel...`);
-                await member.voice.setChannel(newChannel);
-                console.log(`✅ User moved successfully!`);
-
-                // Play audio
-                console.log(`🎵 Starting audio playback...`);
-                
-                // SET CLEANUP TIMER BEFORE CALLING playAudio
-                console.log(`⏰ Setting 5-second cleanup timer BEFORE playAudio`);
-                setTimeout(() => {
-                    console.log(`🚨 5-SECOND TIMER FIRED! Bot should leave now`);
-                    
-                    // Nuclear cleanup
-                    voiceConnections.forEach((conn, key) => {
-                        console.log(`🔌 Destroying connection ${key}`);
-                        try { conn.destroy(); } catch (e) { console.log(`Error: ${e.message}`); }
-                    });
-                    
-                    audioPlayers.forEach((player, key) => {
-                        console.log(`🎵 Stopping player ${key}`);
-                        try { player.stop(); } catch (e) { console.log(`Error: ${e.message}`); }
-                    });
-                    
-                    voiceConnections.clear();
-                    audioPlayers.clear();
-                    
-                    console.log(`✅ CLEANUP COMPLETED - Bot should be gone from voice`);
-                }, 5000);
-                
-                await playAudio(newChannel, member);
-
-            } catch (error) {
-                console.error('❌ Error in voice state update:', error);
             }
-        } else {
-            console.log('❌ Channel name does not match. No action taken.');
+
+            // Create new voice channel
+            const randomName = onePieceLocations[Math.floor(Math.random() * onePieceLocations.length)];
+            const newChannel = await guild.channels.create({
+                name: randomName,
+                type: ChannelType.GuildVoice,
+                parent: category.id,
+                permissionOverwrites: [
+                    {
+                        id: member.id,
+                        allow: [
+                            PermissionFlagsBits.ManageChannels,
+                            PermissionFlagsBits.MoveMembers,
+                            PermissionFlagsBits.MuteMembers,
+                            PermissionFlagsBits.DeafenMembers
+                        ]
+                    }
+                ]
+            });
+
+            console.log(`✅ Channel created: ${newChannel.name}`);
+
+            // Move user to new channel
+            await member.voice.setChannel(newChannel);
+            console.log(`✅ User moved to new channel`);
+
+            // Play audio with 6-second auto-disconnect
+            await playAudio(newChannel);
+
+        } catch (error) {
+            console.error('❌ Error creating channel:', error);
         }
     }
 
-    // Handle channel cleanup
+    // Handle channel cleanup when empty
     if (oldState.channel && 
         oldState.channel.parent && 
         oldState.channel.parent.name === categoryName &&
-        oldState.channel.name !== createChannelName) {
+        oldState.channel.name !== createChannelName &&
+        oldState.channel.members.size === 0) {
         
-        console.log(`🧹 Checking if ${oldState.channel.name} needs cleanup...`);
+        console.log(`🧹 Cleaning up empty channel: ${oldState.channel.name}`);
         
-        if (oldState.channel.members.size === 0) {
-            console.log(`⏰ Empty channel detected. Scheduling cleanup in ${deleteDelay}ms...`);
-            
-            setTimeout(async () => {
-                try {
-                    if (oldState.channel && oldState.channel.members.size === 0) {
-                        const connectionKey = `${oldState.channel.guild.id}-${oldState.channel.id}`;
-                        
-                        // Clean up voice connection
-                        if (voiceConnections.has(connectionKey)) {
-                            console.log(`🔌 Cleaning up voice connection...`);
-                            const connection = voiceConnections.get(connectionKey);
-                            connection.destroy();
-                            voiceConnections.delete(connectionKey);
-                        }
-                        
-                        // Clean up audio player
-                        if (audioPlayers.has(connectionKey)) {
-                            console.log(`🎵 Stopping audio player...`);
-                            const player = audioPlayers.get(connectionKey);
-                            player.stop();
-                            audioPlayers.delete(connectionKey);
-                        }
-
-                        // Clear any cleanup timers
-                        if (cleanupTimers.has(connectionKey)) {
-                            clearTimeout(cleanupTimers.get(connectionKey));
-                            cleanupTimers.delete(connectionKey);
-                        }
-
-                        await oldState.channel.delete();
-                        console.log(`🗑️ Deleted empty crew: ${oldState.channel.name}`);
-                    } else {
-                        console.log(`👥 Channel no longer empty, keeping it.`);
-                    }
-                } catch (error) {
-                    console.error('❌ Error during cleanup:', error);
+        setTimeout(async () => {
+            try {
+                if (oldState.channel && oldState.channel.members.size === 0) {
+                    await oldState.channel.delete();
+                    console.log(`🗑️ Deleted empty channel: ${oldState.channel.name}`);
                 }
-            }, deleteDelay);
-        }
+            } catch (error) {
+                console.error('❌ Error deleting channel:', error);
+            }
+        }, deleteDelay);
     }
 });
 
-// Simplified message handler for testing
+// Simple message commands
 client.on('messageCreate', async (message) => {
     if (message.author.bot) return;
     
-    console.log(`📨 Message received: "${message.content}" from ${message.author.tag}`);
-    
     if (message.content === '!ping') {
-        console.log('🏓 Ping command received');
         message.reply('🏴‍☠️ Pong! Bot is working!');
-        return;
     }
     
     if (message.content === '!forceLeave') {
-        console.log('🧹 Force leave command received');
-        
         if (!message.member?.permissions?.has(PermissionFlagsBits.Administrator)) {
             message.reply('❌ You need administrator permissions!');
             return;
         }
         
         let cleaned = 0;
-        
-        // Force cleanup all connections
         voiceConnections.forEach((connection, key) => {
-            console.log(`🔌 Force destroying connection: ${key}`);
             try {
                 connection.destroy();
                 voiceConnections.delete(key);
                 cleaned++;
             } catch (err) {
-                console.log(`❌ Error destroying connection: ${err.message}`);
+                console.log(`Error destroying connection: ${err.message}`);
             }
         });
         
         audioPlayers.forEach((player, key) => {
-            console.log(`🎵 Force stopping player: ${key}`);
             try {
                 player.stop();
                 audioPlayers.delete(key);
             } catch (err) {
-                console.log(`❌ Error stopping player: ${err.message}`);
+                console.log(`Error stopping player: ${err.message}`);
             }
-        });
-        
-        // Clear all timers
-        cleanupTimers.forEach((timer, key) => {
-            clearTimeout(timer);
-            cleanupTimers.delete(key);
         });
         
         message.reply(`🧹 Cleaned up ${cleaned} voice connections!`);
     }
     
     if (message.content === '!status') {
-        const status = `📊 Connections: ${voiceConnections.size} | Players: ${audioPlayers.size} | Timers: ${cleanupTimers.size}`;
+        const status = `📊 Active connections: ${voiceConnections.size} | Active players: ${audioPlayers.size}`;
         message.reply(status);
     }
 });
 
-async function playAudio(channel, member) {
-    console.log(`🎵 playAudio() called - STARTING TIMER IMMEDIATELY`);
-    
-    // SET TIMER FIRST THING - before any other code
-    const cleanupTimer = setTimeout(() => {
-        console.log(`🚨 5-SECOND TIMER FIRED! NUCLEAR CLEANUP`);
-        console.log(`🔍 Total connections: ${voiceConnections.size}`);
-        console.log(`🔍 Total players: ${audioPlayers.size}`);
-        
-        // Destroy everything
-        try {
-            voiceConnections.forEach((conn, key) => {
-                console.log(`🔌 Nuking connection ${key}`);
-                conn.destroy();
-            });
-            
-            audioPlayers.forEach((player, key) => {
-                console.log(`🎵 Nuking player ${key}`);
-                player.stop();
-            });
-            
-            voiceConnections.clear();
-            audioPlayers.clear();
-            cleanupTimers.clear();
-            
-            console.log(`✅ NUCLEAR CLEANUP COMPLETED - Bot should be gone`);
-        } catch (error) {
-            console.error(`❌ Error in nuclear cleanup: ${error.message}`);
-        }
-    }, 5000);
-    
-    console.log(`✅ 5-SECOND NUCLEAR TIMER IS SET`);
-    
+async function playAudio(channel) {
     const channelName = channel.name;
     const channelId = channel.id;
     const guildId = channel.guild.id;
     const connectionKey = `${guildId}-${channelId}`;
     
-    cleanupTimers.set(connectionKey, cleanupTimer);
-    console.log(`💾 Timer stored for ${channelName}`);
+    console.log(`🎵 Playing audio in ${channelName}`);
     
     try {
         if (!fs.existsSync(audioFilePath)) {
-            console.error('❌ Audio file not found, cannot play audio');
+            console.error('❌ Audio file not found');
             return;
         }
 
-        console.log(`🔌 Joining voice channel: ${channelName}`);
-
+        // Join voice channel
         const connection = joinVoiceChannel({
             channelId: channelId,
             guildId: guildId,
@@ -353,10 +223,29 @@ async function playAudio(channel, member) {
         });
 
         voiceConnections.set(connectionKey, connection);
-        console.log(`💾 Stored voice connection with key: ${connectionKey}`);
+
+        // Set 6-second auto-disconnect timer
+        const disconnectTimer = setTimeout(() => {
+            console.log(`⏰ 6 seconds elapsed - disconnecting from ${channelName}`);
+            try {
+                if (voiceConnections.has(connectionKey)) {
+                    const conn = voiceConnections.get(connectionKey);
+                    conn.destroy();
+                    voiceConnections.delete(connectionKey);
+                }
+                if (audioPlayers.has(connectionKey)) {
+                    const player = audioPlayers.get(connectionKey);
+                    player.stop();
+                    audioPlayers.delete(connectionKey);
+                }
+                console.log(`✅ Bot disconnected from ${channelName}`);
+            } catch (error) {
+                console.error('❌ Error during disconnect:', error);
+            }
+        }, 6000); // 6 seconds
 
         connection.on(VoiceConnectionStatus.Ready, () => {
-            console.log('✅ Voice connection is ready!');
+            console.log(`🔌 Connected to ${channelName}`);
             
             try {
                 const player = createAudioPlayer();
@@ -365,24 +254,17 @@ async function playAudio(channel, member) {
                 });
                 
                 resource.volume.setVolume(0.5);
-                console.log(`🔊 Volume set to 50%`);
-                
                 audioPlayers.set(connectionKey, player);
 
-                console.log(`▶️ Starting audio playback...`);
                 player.play(resource);
                 connection.subscribe(player);
 
                 player.on(AudioPlayerStatus.Playing, () => {
-                    console.log(`🎵 ✅ Audio is now playing in ${channelName}!`);
+                    console.log(`🎵 Audio playing in ${channelName}`);
                 });
 
                 player.on(AudioPlayerStatus.Idle, () => {
-                    console.log(`🎵 Audio finished playing in ${channelName}`);
-                });
-
-                player.on('error', error => {
-                    console.error('❌ Audio player error:', error);
+                    console.log(`🎵 Audio finished in ${channelName}`);
                 });
 
             } catch (audioError) {
@@ -391,67 +273,43 @@ async function playAudio(channel, member) {
         });
 
         connection.on(VoiceConnectionStatus.Disconnected, () => {
-            console.log(`🔌 Connection disconnected: ${channelName}`);
-        });
-
-        connection.on('error', error => {
-            console.error('❌ Voice connection error:', error);
+            console.log(`🔌 Disconnected from ${channelName}`);
+            clearTimeout(disconnectTimer);
+            voiceConnections.delete(connectionKey);
+            audioPlayers.delete(connectionKey);
         });
 
     } catch (error) {
-        console.error('❌ Error in playAudio function:', error);
+        console.error('❌ Error in playAudio:', error);
     }
 }
 
-// Enhanced error handling
-process.on('unhandledRejection', (reason, promise) => {
-    console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
-});
-
-process.on('uncaughtException', (error) => {
-    console.error('❌ Uncaught Exception:', error);
-});
-
-// Railway-specific process handling
+// Graceful shutdown
 process.on('SIGINT', gracefulShutdown);
 process.on('SIGTERM', gracefulShutdown);
 
 function gracefulShutdown() {
-    console.log('\n🌊 Bot shutting down gracefully...');
+    console.log('🌊 Bot shutting down gracefully...');
     
     voiceConnections.forEach((connection, key) => {
-        console.log(`🔌 Destroying connection: ${key}`);
         try {
             connection.destroy();
         } catch (err) {
-            console.log(`Error destroying connection ${key}:`, err.message);
+            console.log(`Error destroying connection: ${err.message}`);
         }
     });
     
     audioPlayers.forEach((player, key) => {
-        console.log(`🎵 Stopping player: ${key}`);
         try {
             player.stop();
         } catch (err) {
-            console.log(`Error stopping player ${key}:`, err.message);
+            console.log(`Error stopping player: ${err.message}`);
         }
     });
     
-    cleanupTimers.forEach((timer, key) => {
-        clearTimeout(timer);
-    });
-    
     client.destroy();
-    console.log('👋 Goodbye!');
     process.exit(0);
 }
 
-// Keep the process alive
-setInterval(() => {
-    console.log(`🏴‍☠️ Bot is alive - ${new Date().toISOString()}`);
-}, 300000); // Log every 5 minutes
-
 console.log('🚀 Starting bot...');
-console.log('🔑 Token provided:', process.env.DISCORD_TOKEN ? 'Yes' : 'No');
-
 client.login(process.env.DISCORD_TOKEN);
