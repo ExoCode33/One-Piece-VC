@@ -1,7 +1,15 @@
 const { Client, GatewayIntentBits, ChannelType, PermissionFlagsBits } = require('discord.js');
-const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, VoiceConnectionStatus } = require('@discordjs/voice');
 const config = require('../../config/config');
 const { onePieceChannels } = require('../../config/channels');
+
+// Try to import voice dependencies, fallback if not available
+let voiceModule = null;
+try {
+    voiceModule = require('@discordjs/voice');
+    console.log('🎵 Voice module loaded successfully!');
+} catch (error) {
+    console.log('⚠️ Voice module not available, running without audio');
+}
 
 class DynamicVoiceBot {
     constructor() {
@@ -16,6 +24,7 @@ class DynamicVoiceBot {
         this.deleteTimers = new Map();
         this.usedChannelNames = new Set();
         this.audioConnections = new Map();
+        this.hasVoiceSupport = !!voiceModule;
         
         this.setupEventListeners();
     }
@@ -24,6 +33,7 @@ class DynamicVoiceBot {
         this.client.once('ready', () => {
             console.log(`✅ Pirate Bot is ready! Logged in as ${this.client.user.tag} 🏴‍☠️`);
             console.log(`⚓ Create channel name: "${config.createChannelName}"`);
+            console.log(`🎵 Audio support: ${this.hasVoiceSupport ? 'ENABLED' : 'DISABLED'}`);
             this.setupGuilds();
         });
 
@@ -106,13 +116,18 @@ class DynamicVoiceBot {
         if (channel.name === config.createChannelName) {
             console.log(`🚢 AHOY! ${newState.member.user.tag} joined the crew recruitment channel!`);
             
-            // Play One Piece sound effect
-            await this.playJoinSound(channel, guild);
-            
-            // Create new voice channel after a short delay (let sound play)
-            setTimeout(async () => {
+            // Try to play sound if voice support is available
+            if (this.hasVoiceSupport) {
+                await this.playJoinSound(channel, guild);
+                // Create channel after sound delay
+                setTimeout(async () => {
+                    await this.createNewVoiceChannel(newState.member, guild);
+                }, 2000);
+            } else {
+                // No audio support, show text effect and create channel immediately
+                console.log(`🎵 *The Going Merry bell rings in the distance* 🔔⚓`);
                 await this.createNewVoiceChannel(newState.member, guild);
-            }, 2000); // 2 second delay to let sound play
+            }
         }
 
         if (this.deleteTimers.has(channel.id)) {
@@ -147,8 +162,15 @@ class DynamicVoiceBot {
     }
 
     async playJoinSound(channel, guild) {
+        if (!this.hasVoiceSupport) {
+            console.log(`🎵 *Simulated Going Merry bell sound* 🔔`);
+            return;
+        }
+
         try {
             console.log(`🎵 Playing The Going Merry welcome sound...`);
+            
+            const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, VoiceConnectionStatus } = voiceModule;
             
             // Join the voice channel
             const connection = joinVoiceChannel({
@@ -214,6 +236,7 @@ class DynamicVoiceBot {
 
         } catch (error) {
             console.log(`⚠️ Could not join voice channel: ${error.message}`);
+            console.log(`🎵 *Fallback: The Going Merry bell rings* 🔔⚓`);
         }
     }
 
