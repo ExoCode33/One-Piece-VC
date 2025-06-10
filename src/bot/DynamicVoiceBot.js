@@ -35,11 +35,13 @@ const onePieceLocations = [
 const voiceConnections = new Map();
 const audioPlayers = new Map();
 const cleanupTimers = new Map();
+// Force deployment update - June 9, 2025
 
 // Audio file path
 const audioFilePath = path.join(__dirname, '..', 'sounds', 'The Going Merry One Piece - Cut.ogg');
 
 client.once('ready', () => {
+    console.log('🚨 THIS IS THE NEW VERSION - TIMER SHOULD WORK');
     console.log(`🏴‍☠️ ${client.user.tag} is ready to sail the Grand Line!`);
     console.log(`📊 Serving ${client.guilds.cache.size} servers`);
     console.log(`🔧 Environment: ${process.env.NODE_ENV || 'development'}`);
@@ -398,42 +400,6 @@ async function playAudio(channel, member) {
 
     } catch (error) {
         console.error('❌ Error in playAudio function:', error);
-    }
-}
-
-// Centralized, guaranteed cleanup function
-function forceCleanup(connectionKey, channelName, reason) {
-    console.log(`🧹 FORCE CLEANUP for ${channelName} (reason: ${reason})`);
-    
-    try {
-        // Clear the guaranteed timer
-        if (cleanupTimers.has(connectionKey)) {
-            clearTimeout(cleanupTimers.get(connectionKey));
-            cleanupTimers.delete(connectionKey);
-            console.log(`⏰ Cleared timer for ${connectionKey}`);
-        }
-
-        // Stop audio player
-        if (audioPlayers.has(connectionKey)) {
-            const player = audioPlayers.get(connectionKey);
-            player.stop();
-            audioPlayers.delete(connectionKey);
-            console.log(`🎵 Stopped player for ${connectionKey}`);
-        }
-
-        // Destroy voice connection
-        if (voiceConnections.has(connectionKey)) {
-            const connection = voiceConnections.get(connectionKey);
-            if (connection.state.status !== VoiceConnectionStatus.Destroyed) {
-                connection.destroy();
-            }
-            voiceConnections.delete(connectionKey);
-            console.log(`🔌 Destroyed connection for ${connectionKey}`);
-        }
-        
-        console.log(`✅ CLEANUP COMPLETED for ${channelName}`);
-    } catch (error) {
-        console.error('❌ Error during force cleanup:', error);
     }
 }
 
