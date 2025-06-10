@@ -146,18 +146,21 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
         oldState.channel.name !== createChannelName &&
         oldState.channel.members.size === 0) {
         
-        console.log(`🧹 Channel empty: ${oldState.channel.name} - deleting in 1 second`);
+        const channelToDelete = oldState.channel; // Store reference before timeout
+        const channelName = channelToDelete.name; // Store name before timeout
+        
+        console.log(`🧹 Channel empty: ${channelName} - deleting in 1 second`);
         
         setTimeout(async () => {
             try {
-                if (oldState.channel && oldState.channel.members.size === 0) {
-                    await oldState.channel.delete();
-                    console.log(`🗑️ Deleted empty channel: ${oldState.channel.name}`);
+                if (channelToDelete && channelToDelete.members.size === 0) {
+                    await channelToDelete.delete();
+                    console.log(`🗑️ Deleted empty channel: ${channelName}`);
                 }
             } catch (error) {
                 console.error('❌ Error deleting channel:', error);
             }
-        }, 1000); // Changed to 1 second
+        }, 1000);
     }
 });
 
