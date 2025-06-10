@@ -305,6 +305,7 @@ async function playAudio(channel, member) {
         }, 6000);
         
         cleanupTimers.set(connectionKey, guaranteedTimer);
+        console.log(`✅ Timer set and stored for ${connectionKey}`);
 
         connection.on(VoiceConnectionStatus.Ready, () => {
             console.log('✅ Voice connection is ready!');
@@ -334,6 +335,7 @@ async function playAudio(channel, member) {
                     
                     // Audio finished, cleanup in 1 second
                     setTimeout(() => {
+                        console.log(`🧹 Executing cleanup after audio finished...`);
                         forceCleanup(connectionKey, channelName, 'audio-finished');
                     }, 1000);
                 });
