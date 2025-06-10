@@ -109,6 +109,7 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
                 name: randomName,
                 type: ChannelType.GuildVoice,
                 parent: category.id,
+                position: newState.channel.position + 1, // Position right below the trigger channel
                 permissionOverwrites: [
                     {
                         id: member.id,
