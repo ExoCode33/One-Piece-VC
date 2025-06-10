@@ -2,13 +2,19 @@ const { Client, GatewayIntentBits, ChannelType, PermissionFlagsBits } = require(
 const config = require('../../config/config');
 const { onePieceChannels } = require('../../config/channels');
 
-// Try to import voice dependencies, fallback if not available
+// Optimized voice module loading
 let voiceModule = null;
-try {
-    voiceModule = require('@discordjs/voice');
-    console.log('🎵 Voice module loaded successfully!');
-} catch (error) {
-    console.log('⚠️ Voice module not available, running without audio');
+let hasVoiceSupport = false;
+
+async function loadVoiceModule() {
+    try {
+        voiceModule = await import('@discordjs/voice');
+        hasVoiceSupport = true;
+        console.log('🎵 Voice module loaded successfully!');
+    } catch (error) {
+        console.log('⚠️ Voice module not available, running without audio');
+        hasVoiceSupport = false;
+    }
 }
 
 class DynamicVoiceBot {
@@ -24,16 +30,21 @@ class DynamicVoiceBot {
         this.deleteTimers = new Map();
         this.usedChannelNames = new Set();
         this.audioConnections = new Map();
-        this.hasVoiceSupport = !!voiceModule;
+        this.hasVoiceSupport = hasVoiceSupport;
         
         this.setupEventListeners();
     }
 
     setupEventListeners() {
-        this.client.once('ready', () => {
+        this.client.once('ready', async () => {
             console.log(`✅ Pirate Bot is ready! Logged in as ${this.client.user.tag} 🏴‍☠️`);
             console.log(`⚓ Create channel name: "${config.createChannelName}"`);
+            
+            // Load voice module after bot is ready
+            await loadVoiceModule();
+            this.hasVoiceSupport = hasVoiceSupport;
             console.log(`🎵 Audio support: ${this.hasVoiceSupport ? 'ENABLED' : 'DISABLED'}`);
+            
             this.setupGuilds();
         });
 
@@ -152,8 +163,8 @@ class DynamicVoiceBot {
     }
 
     async playJoinSound(channel, guild) {
-        if (!this.hasVoiceSupport) {
-            console.log(`🎵 *Simulated Going Merry bell sound* 🔔`);
+        if (!this.hasVoiceSupport || !voiceModule) {
+            console.log(`🎵 *The Going Merry bell rings welcoming the new crew* 🔔⚓`);
             return;
         }
 
@@ -314,13 +325,9 @@ class DynamicVoiceBot {
             console.log(`🏴‍☠️ NEW PIRATE CREW FORMED: ${channelName} - Captain ${member.user.tag}! ⚓`);
 
             // NOW play the welcome sound in the NEW channel
-            if (this.hasVoiceSupport) {
-                setTimeout(async () => {
-                    await this.playJoinSound(newChannel, guild);
-                }, 1000); // Small delay to ensure user is moved
-            } else {
-                console.log(`🎵 *The Going Merry bell rings welcoming the new crew* 🔔⚓`);
-            }
+            setTimeout(async () => {
+                await this.playJoinSound(newChannel, guild);
+            }, 1000); // Small delay to ensure user is moved
 
         } catch (error) {
             console.error(`❌ Failed to create pirate crew for ${member.user.tag}:`, error);
