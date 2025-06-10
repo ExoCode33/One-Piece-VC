@@ -183,10 +183,8 @@ class DynamicVoiceBot {
                     // Create a simple audio player
                     const player = createAudioPlayer();
                     
-                    // Try to create audio resource (simpler approach)
-                    const resource = createAudioResource('./sounds/The Going Merry One Piece - Cut.mp3', {
-                        inlineVolume: true
-                    });
+                    // Try to create audio resource without FFmpeg
+                    const resource = createAudioResource('./sounds/The Going Merry One Piece - Cut.mp3');
                     
                     // Subscribe player to connection
                     connection.subscribe(player);
