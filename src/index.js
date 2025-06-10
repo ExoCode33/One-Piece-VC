@@ -99,6 +99,7 @@ client.once('ready', () => {
     // Check environment variables
     console.log(`📝 CREATE_CHANNEL_NAME: "${process.env.CREATE_CHANNEL_NAME || '🏴‍☠️ Set Sail Together'}"`);
     console.log(`📂 CATEGORY_NAME: "${process.env.CATEGORY_NAME || '🌊 Grand Line Voice Channels'}"`);
+    console.log(`🔊 AUDIO_VOLUME: ${process.env.AUDIO_VOLUME || '0.5'} (50% default)`);
     
     // Verify audio file exists
     console.log(`🎵 Checking audio file at: ${audioFilePath}`);
@@ -312,7 +313,11 @@ async function playAudio(channel) {
                     inlineVolume: true
                 });
                 
-                resource.volume.setVolume(0.5);
+                // Get volume from environment variable (0.0 to 1.0, default 0.5)
+                const volume = parseFloat(process.env.AUDIO_VOLUME) || 0.5;
+                resource.volume.setVolume(volume);
+                console.log(`🔊 Volume set to ${Math.round(volume * 100)}%`);
+                
                 audioPlayers.set(connectionKey, player);
 
                 player.play(resource);
