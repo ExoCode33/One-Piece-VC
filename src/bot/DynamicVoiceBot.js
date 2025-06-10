@@ -300,20 +300,21 @@ async function playAudio(channel, member) {
                     }, 500);
                 });
 
-                // Safety timeout - disconnect after 60 seconds max
+                // Forced disconnect after 7 seconds (audio is 6 seconds)
                 setTimeout(() => {
                     if (voiceConnections.has(connectionKey)) {
-                        console.log(`⏰ Maximum audio time reached, disconnecting from ${channel.name}`);
+                        console.log(`⏰ 7 seconds elapsed, forcing disconnect from ${channel.name}`);
                         try {
                             const conn = voiceConnections.get(connectionKey);
                             conn.destroy();
                             voiceConnections.delete(connectionKey);
                             audioPlayers.delete(connectionKey);
+                            console.log(`✅ Bot forcefully disconnected from ${channel.name}`);
                         } catch (error) {
-                            console.error('❌ Error in safety timeout disconnect:', error);
+                            console.error('❌ Error in forced disconnect:', error);
                         }
                     }
-                }, 60000); // 60 seconds maximum
+                }, 7000); // 7 seconds - guaranteed disconnect
 
             } catch (audioError) {
                 console.error('❌ Error setting up audio:', audioError);
