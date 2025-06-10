@@ -18,7 +18,7 @@ const client = new Client({
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildVoiceStates,
         GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.MessageContent // This is crucial for reading message content
+        GatewayIntentBits.MessageContent
     ]
 });
 
@@ -31,9 +31,10 @@ const onePieceLocations = [
     "🏴‍☠️ Alabasta Adventure"
 ];
 
-// Store active connections
+// Store active connections with cleanup timers
 const voiceConnections = new Map();
 const audioPlayers = new Map();
+const cleanupTimers = new Map();
 
 // Audio file path
 const audioFilePath = path.join(__dirname, '..', 'sounds', 'The Going Merry One Piece - Cut.ogg');
@@ -193,6 +194,12 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
                             audioPlayers.delete(connectionKey);
                         }
 
+                        // Clear any cleanup timers
+                        if (cleanupTimers.has(connectionKey)) {
+                            clearTimeout(cleanupTimers.get(connectionKey));
+                            cleanupTimers.delete(connectionKey);
+                        }
+
                         await oldState.channel.delete();
                         console.log(`🗑️ Deleted empty crew: ${oldState.channel.name}`);
                     } else {
@@ -206,14 +213,12 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
     }
 });
 
-// Manual cleanup command with debug logging
+// Simplified message handler for testing
 client.on('messageCreate', async (message) => {
-    // Ignore bot messages
     if (message.author.bot) return;
     
     console.log(`📨 Message received: "${message.content}" from ${message.author.tag}`);
     
-    // Simple test command
     if (message.content === '!ping') {
         console.log('🏓 Ping command received');
         message.reply('🏴‍☠️ Pong! Bot is working!');
@@ -221,72 +226,61 @@ client.on('messageCreate', async (message) => {
     }
     
     if (message.content === '!forceLeave') {
-        console.log('🎯 Force leave command detected!');
-        console.log(`👤 User: ${message.author.tag}`);
-        console.log(`🔑 Has admin permissions: ${message.member?.permissions?.has(PermissionFlagsBits.Administrator)}`);
+        console.log('🧹 Force leave command received');
         
-        if (message.member?.permissions?.has(PermissionFlagsBits.Administrator)) {
-            console.log('🧹 Force leave command received - executing cleanup');
-            console.log(`📊 Active connections: ${voiceConnections.size}`);
-            console.log(`📊 Active players: ${audioPlayers.size}`);
-            
-            if (voiceConnections.size === 0 && audioPlayers.size === 0) {
-                console.log('ℹ️ No active connections or players to clean up');
-                message.reply('ℹ️ No active voice connections to clean up!');
-                return;
-            }
-            
-            voiceConnections.forEach((connection, key) => {
-                console.log(`🔌 Force destroying connection: ${key}`);
-                try {
-                    connection.destroy();
-                    voiceConnections.delete(key);
-                    console.log(`✅ Connection ${key} destroyed`);
-                } catch (err) {
-                    console.log(`❌ Error destroying connection ${key}:`, err.message);
-                }
-            });
-            
-            audioPlayers.forEach((player, key) => {
-                console.log(`🎵 Force stopping player: ${key}`);
-                try {
-                    player.stop();
-                    audioPlayers.delete(key);
-                } catch (err) {
-                    console.log(`❌ Error stopping player ${key}:`, err.message);
-                }
-            });
-            
-            console.log('✅ Force cleanup completed');
-            message.reply('🧹 Bot forced to leave all voice channels!');
-        } else {
-            console.log('❌ User does not have admin permissions');
-            message.reply('❌ You need administrator permissions to use this command!');
+        if (!message.member?.permissions?.has(PermissionFlagsBits.Administrator)) {
+            message.reply('❌ You need administrator permissions!');
+            return;
         }
+        
+        let cleaned = 0;
+        
+        // Force cleanup all connections
+        voiceConnections.forEach((connection, key) => {
+            console.log(`🔌 Force destroying connection: ${key}`);
+            try {
+                connection.destroy();
+                voiceConnections.delete(key);
+                cleaned++;
+            } catch (err) {
+                console.log(`❌ Error destroying connection: ${err.message}`);
+            }
+        });
+        
+        audioPlayers.forEach((player, key) => {
+            console.log(`🎵 Force stopping player: ${key}`);
+            try {
+                player.stop();
+                audioPlayers.delete(key);
+            } catch (err) {
+                console.log(`❌ Error stopping player: ${err.message}`);
+            }
+        });
+        
+        // Clear all timers
+        cleanupTimers.forEach((timer, key) => {
+            clearTimeout(timer);
+            cleanupTimers.delete(key);
+        });
+        
+        message.reply(`🧹 Cleaned up ${cleaned} voice connections!`);
     }
     
-    // Debug command to check bot status
     if (message.content === '!status') {
-        console.log('📊 Status command received');
-        const status = `
-📊 **Bot Status:**
-🔌 Active connections: ${voiceConnections.size}
-🎵 Active players: ${audioPlayers.size}
-🤖 Bot user: ${client.user.tag}
-`;
+        const status = `📊 Connections: ${voiceConnections.size} | Players: ${audioPlayers.size} | Timers: ${cleanupTimers.size}`;
         message.reply(status);
     }
 });
 
 async function playAudio(channel, member) {
-    const channelName = channel.name; // Store channel name as string to avoid null reference errors
+    const channelName = channel.name;
     const channelId = channel.id;
     const guildId = channel.guild.id;
+    const connectionKey = `${guildId}-${channelId}`;
     
     console.log(`🎵 playAudio() called for channel: ${channelName}`);
     
     try {
-        // Check if audio file exists
         if (!fs.existsSync(audioFilePath)) {
             console.error('❌ Audio file not found, cannot play audio');
             return;
@@ -294,169 +288,121 @@ async function playAudio(channel, member) {
 
         console.log(`🔌 Joining voice channel: ${channelName}`);
 
-        // Create voice connection
         const connection = joinVoiceChannel({
             channelId: channelId,
             guildId: guildId,
             adapterCreator: channel.guild.voiceAdapterCreator,
         });
 
-        // Store connection
-        const connectionKey = `${guildId}-${channelId}`;
         voiceConnections.set(connectionKey, connection);
         console.log(`💾 Stored voice connection with key: ${connectionKey}`);
 
-        // Create a cleanup function to avoid duplication
-        const cleanupConnection = (reason = 'unknown') => {
-            console.log(`🧹 Cleaning up connection for ${channelName} (reason: ${reason})`);
-            console.log(`🔍 Before cleanup - Connection exists: ${voiceConnections.has(connectionKey)}`);
-            console.log(`🔍 Before cleanup - Player exists: ${audioPlayers.has(connectionKey)}`);
-            
-            try {
-                // Stop audio player first
-                if (audioPlayers.has(connectionKey)) {
-                    const player = audioPlayers.get(connectionKey);
-                    console.log(`🎵 Stopping audio player...`);
-                    player.stop();
-                    audioPlayers.delete(connectionKey);
-                    console.log(`🎵 Audio player stopped and removed`);
-                } else {
-                    console.log(`🎵 No audio player to clean up`);
-                }
+        // Set up a GUARANTEED cleanup timer - this will run no matter what
+        console.log(`⏰ Setting GUARANTEED 6-second cleanup timer for ${channelName}`);
+        const guaranteedTimer = setTimeout(() => {
+            console.log(`🚨 GUARANTEED TIMER: Force disconnecting from ${channelName}`);
+            forceCleanup(connectionKey, channelName, 'guaranteed-timer');
+        }, 6000);
+        
+        cleanupTimers.set(connectionKey, guaranteedTimer);
 
-                // Destroy voice connection
-                if (voiceConnections.has(connectionKey)) {
-                    const conn = voiceConnections.get(connectionKey);
-                    console.log(`🔌 Connection status: ${conn.state.status}`);
-                    
-                    if (conn.state.status !== VoiceConnectionStatus.Destroyed) {
-                        console.log(`🔌 Destroying voice connection...`);
-                        conn.destroy();
-                        console.log(`🔌 Voice connection destroyed`);
-                    } else {
-                        console.log(`🔌 Connection already destroyed`);
-                    }
-                    voiceConnections.delete(connectionKey);
-                    console.log(`🔌 Connection removed from map`);
-                } else {
-                    console.log(`🔌 No voice connection to clean up`);
-                }
-                
-                console.log(`✅ Cleanup completed for ${channelName}`);
-                console.log(`🔍 After cleanup - Connection exists: ${voiceConnections.has(connectionKey)}`);
-                console.log(`🔍 After cleanup - Player exists: ${audioPlayers.has(connectionKey)}`);
-            } catch (error) {
-                console.error('❌ Error during cleanup:', error);
-                console.error('❌ Stack trace:', error.stack);
-            }
-        };
-
-        // Set up the guaranteed disconnect timer FIRST
-        console.log(`⏰ Setting up 7-second force disconnect timer for ${channelName}`);
-        const forceDisconnectTimer = setTimeout(() => {
-            console.log(`⏰ 7 seconds elapsed, forcing disconnect from ${channelName}`);
-            console.log(`🔍 Connection exists: ${voiceConnections.has(connectionKey)}`);
-            console.log(`🔍 Player exists: ${audioPlayers.has(connectionKey)}`);
-            cleanupConnection('7-second-timeout');
-        }, 7000);
-
-        // Handle connection events
         connection.on(VoiceConnectionStatus.Ready, () => {
             console.log('✅ Voice connection is ready!');
             
             try {
-                // Create audio player and resource
-                console.log(`🎼 Creating audio player and resource...`);
                 const player = createAudioPlayer();
                 const resource = createAudioResource(audioFilePath, {
                     inlineVolume: true
                 });
                 
-                // Set volume
                 resource.volume.setVolume(0.5);
                 console.log(`🔊 Volume set to 50%`);
                 
-                // Store player
                 audioPlayers.set(connectionKey, player);
 
-                // Play the audio
                 console.log(`▶️ Starting audio playback...`);
                 player.play(resource);
                 connection.subscribe(player);
 
-                // Handle player events
                 player.on(AudioPlayerStatus.Playing, () => {
                     console.log(`🎵 ✅ Audio is now playing in ${channelName}!`);
                 });
 
                 player.on(AudioPlayerStatus.Idle, () => {
                     console.log(`🎵 Audio finished playing in ${channelName}`);
-                    console.log(`🔄 Clearing force disconnect timer...`);
+                    console.log(`🔄 Audio finished - triggering cleanup in 1 second...`);
                     
-                    // Clear the force disconnect timer since we're handling it now
-                    clearTimeout(forceDisconnectTimer);
-                    console.log(`✅ Timer cleared, scheduling cleanup...`);
-                    
-                    // Small delay to ensure audio finished cleanly, then disconnect
+                    // Audio finished, cleanup in 1 second
                     setTimeout(() => {
-                        console.log(`🧹 Executing cleanup after audio finished...`);
-                        cleanupConnection('audio-finished');
+                        forceCleanup(connectionKey, channelName, 'audio-finished');
                     }, 1000);
                 });
 
                 player.on('error', error => {
                     console.error('❌ Audio player error:', error);
-                    
-                    // Clear the force disconnect timer
-                    clearTimeout(forceDisconnectTimer);
-                    
-                    // Cleanup on error
                     setTimeout(() => {
-                        cleanupConnection('audio-error');
+                        forceCleanup(connectionKey, channelName, 'audio-error');
                     }, 500);
                 });
 
             } catch (audioError) {
                 console.error('❌ Error setting up audio:', audioError);
-                
-                // Clear the force disconnect timer
-                clearTimeout(forceDisconnectTimer);
-                
-                // Clean up on setup error
                 setTimeout(() => {
-                    cleanupConnection('setup-error');
+                    forceCleanup(connectionKey, channelName, 'setup-error');
                 }, 500);
             }
         });
 
-        connection.on(VoiceConnectionStatus.Connecting, () => {
-            console.log('🔄 Connecting to voice channel...');
-        });
-
         connection.on(VoiceConnectionStatus.Disconnected, () => {
-            console.log(`🔌 Disconnected from voice channel: ${channelName}`);
-            
-            // Clear the force disconnect timer
-            clearTimeout(forceDisconnectTimer);
-            
-            // Clean up when disconnected
-            cleanupConnection('connection-disconnected');
+            console.log(`🔌 Connection disconnected: ${channelName}`);
+            forceCleanup(connectionKey, channelName, 'connection-disconnected');
         });
 
         connection.on('error', error => {
             console.error('❌ Voice connection error:', error);
-            
-            // Clear the force disconnect timer
-            clearTimeout(forceDisconnectTimer);
-            
-            // Clean up on connection error
             setTimeout(() => {
-                cleanupConnection('connection-error');
+                forceCleanup(connectionKey, channelName, 'connection-error');
             }, 500);
         });
 
     } catch (error) {
         console.error('❌ Error in playAudio function:', error);
+    }
+}
+
+// Centralized, guaranteed cleanup function
+function forceCleanup(connectionKey, channelName, reason) {
+    console.log(`🧹 FORCE CLEANUP for ${channelName} (reason: ${reason})`);
+    
+    try {
+        // Clear the guaranteed timer
+        if (cleanupTimers.has(connectionKey)) {
+            clearTimeout(cleanupTimers.get(connectionKey));
+            cleanupTimers.delete(connectionKey);
+            console.log(`⏰ Cleared timer for ${connectionKey}`);
+        }
+
+        // Stop audio player
+        if (audioPlayers.has(connectionKey)) {
+            const player = audioPlayers.get(connectionKey);
+            player.stop();
+            audioPlayers.delete(connectionKey);
+            console.log(`🎵 Stopped player for ${connectionKey}`);
+        }
+
+        // Destroy voice connection
+        if (voiceConnections.has(connectionKey)) {
+            const connection = voiceConnections.get(connectionKey);
+            if (connection.state.status !== VoiceConnectionStatus.Destroyed) {
+                connection.destroy();
+            }
+            voiceConnections.delete(connectionKey);
+            console.log(`🔌 Destroyed connection for ${connectionKey}`);
+        }
+        
+        console.log(`✅ CLEANUP COMPLETED for ${channelName}`);
+    } catch (error) {
+        console.error('❌ Error during force cleanup:', error);
     }
 }
 
@@ -492,6 +438,10 @@ function gracefulShutdown() {
         } catch (err) {
             console.log(`Error stopping player ${key}:`, err.message);
         }
+    });
+    
+    cleanupTimers.forEach((timer, key) => {
+        clearTimeout(timer);
     });
     
     client.destroy();
