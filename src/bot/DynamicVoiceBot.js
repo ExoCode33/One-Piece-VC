@@ -2,11 +2,21 @@ const { Client, GatewayIntentBits, ChannelType, PermissionFlagsBits } = require(
 const config = require('../../config/config');
 const { onePieceChannels } = require('../../config/channels');
 
-// Try to import voice module
+// Try to import voice module and ffmpeg
 let voiceModule = null;
+let ffmpegPath = null;
+
 try {
     voiceModule = require('@discordjs/voice');
     console.log('🎵 Voice module loaded successfully!');
+    
+    // Try to load ffmpeg-static
+    try {
+        ffmpegPath = require('ffmpeg-static');
+        console.log('🎬 FFmpeg loaded successfully!');
+    } catch (ffmpegError) {
+        console.log('⚠️ FFmpeg not available');
+    }
 } catch (error) {
     console.log('⚠️ Voice module not available, running without audio');
 }
@@ -176,9 +186,16 @@ class DynamicVoiceBot {
                     console.log(`🎤 Bot connected to ${channel.name} - Playing Going Merry sound! ⚓`);
                     
                     try {
-                        // Create audio player and resource
+                        // Create audio player and resource with FFmpeg
                         const player = createAudioPlayer();
-                        const resource = createAudioResource('./sounds/The Going Merry One Piece - Cut.mp3');
+                        
+                        // Create audio resource with FFmpeg path if available
+                        const resourceOptions = {};
+                        if (ffmpegPath) {
+                            resourceOptions.inputType = voiceModule.StreamType.Arbitrary;
+                        }
+                        
+                        const resource = createAudioResource('./sounds/The Going Merry One Piece - Cut.mp3', resourceOptions);
                         
                         // Play the sound
                         player.play(resource);
