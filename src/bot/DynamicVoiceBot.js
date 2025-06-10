@@ -297,15 +297,38 @@ async function playAudio(channel, member) {
         voiceConnections.set(connectionKey, connection);
         console.log(`💾 Stored voice connection with key: ${connectionKey}`);
 
-        // Set up a GUARANTEED cleanup timer - this will run no matter what
-        console.log(`⏰ Setting GUARANTEED 6-second cleanup timer for ${channelName}`);
-        const guaranteedTimer = setTimeout(() => {
-            console.log(`🚨 GUARANTEED TIMER: Force disconnecting from ${channelName}`);
-            forceCleanup(connectionKey, channelName, 'guaranteed-timer');
-        }, 6000);
-        
-        cleanupTimers.set(connectionKey, guaranteedTimer);
-        console.log(`✅ Timer set and stored for ${connectionKey}`);
+        // IMMEDIATE cleanup timer - no matter what happens, bot leaves in 5 seconds
+        console.log(`⏰ Setting IMMEDIATE 5-second cleanup timer for ${channelName}`);
+        setTimeout(() => {
+            console.log(`🚨 5 SECONDS UP! Force disconnecting from ${channelName}`);
+            console.log(`🔍 About to destroy connection for key: ${connectionKey}`);
+            
+            try {
+                if (voiceConnections.has(connectionKey)) {
+                    const conn = voiceConnections.get(connectionKey);
+                    console.log(`🔌 Destroying connection...`);
+                    conn.destroy();
+                    voiceConnections.delete(connectionKey);
+                    console.log(`✅ Connection destroyed and removed`);
+                } else {
+                    console.log(`❌ No connection found for key: ${connectionKey}`);
+                }
+                
+                if (audioPlayers.has(connectionKey)) {
+                    const player = audioPlayers.get(connectionKey);
+                    console.log(`🎵 Stopping player...`);
+                    player.stop();
+                    audioPlayers.delete(connectionKey);
+                    console.log(`✅ Player stopped and removed`);
+                } else {
+                    console.log(`❌ No player found for key: ${connectionKey}`);
+                }
+                
+                console.log(`✅ CLEANUP COMPLETED for ${channelName}`);
+            } catch (error) {
+                console.error(`❌ Error in cleanup: ${error.message}`);
+            }
+        }, 5000); // Simple 5-second timer
 
         connection.on(VoiceConnectionStatus.Ready, () => {
             console.log('✅ Voice connection is ready!');
@@ -331,40 +354,26 @@ async function playAudio(channel, member) {
 
                 player.on(AudioPlayerStatus.Idle, () => {
                     console.log(`🎵 Audio finished playing in ${channelName}`);
-                    console.log(`🔄 Audio finished - triggering cleanup in 1 second...`);
-                    
-                    // Audio finished, cleanup in 1 second
-                    setTimeout(() => {
-                        console.log(`🧹 Executing cleanup after audio finished...`);
-                        forceCleanup(connectionKey, channelName, 'audio-finished');
-                    }, 1000);
+                    // Don't try to cleanup here - let the 5-second timer handle it
                 });
 
                 player.on('error', error => {
                     console.error('❌ Audio player error:', error);
-                    setTimeout(() => {
-                        forceCleanup(connectionKey, channelName, 'audio-error');
-                    }, 500);
+                    // Don't try to cleanup here - let the 5-second timer handle it
                 });
 
             } catch (audioError) {
                 console.error('❌ Error setting up audio:', audioError);
-                setTimeout(() => {
-                    forceCleanup(connectionKey, channelName, 'setup-error');
-                }, 500);
+                // Don't try to cleanup here - let the 5-second timer handle it
             }
         });
 
         connection.on(VoiceConnectionStatus.Disconnected, () => {
             console.log(`🔌 Connection disconnected: ${channelName}`);
-            forceCleanup(connectionKey, channelName, 'connection-disconnected');
         });
 
         connection.on('error', error => {
             console.error('❌ Voice connection error:', error);
-            setTimeout(() => {
-                forceCleanup(connectionKey, channelName, 'connection-error');
-            }, 500);
         });
 
     } catch (error) {
