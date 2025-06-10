@@ -1,400 +1,338 @@
 const { Client, GatewayIntentBits, ChannelType, PermissionFlagsBits } = require('discord.js');
-const config = require('../../config/config');
-const { onePieceChannels } = require('../../config/channels');
+const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, VoiceConnectionStatus } = require('@discordjs/voice');
+const path = require('path');
+const fs = require('fs');
+require('dotenv').config();
 
-// Try to import voice module
-let voiceModule = null;
+// Enable debug logging
+const DEBUG = process.env.DEBUG === 'true';
 
-try {
-    voiceModule = require('@discordjs/voice');
-    console.log('🎵 Voice module loaded successfully!');
-} catch (error) {
-    console.log('⚠️ Voice module not available, running without audio');
+function debugLog(message) {
+    if (DEBUG) {
+        console.log(`🔍 DEBUG: ${message}`);
+    }
 }
 
-class DynamicVoiceBot {
-    constructor() {
-        this.client = new Client({
-            intents: [
-                GatewayIntentBits.Guilds,
-                GatewayIntentBits.GuildVoiceStates
-            ]
-        });
-        
-        this.createdChannels = new Set();
-        this.deleteTimers = new Map();
-        this.usedChannelNames = new Set();
-        this.audioConnections = new Map();
-        this.hasVoiceSupport = !!voiceModule;
-        
-        this.setupEventListeners();
+const client = new Client({
+    intents: [
+        GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildVoiceStates,
+        GatewayIntentBits.GuildMessages
+    ]
+});
+
+// One Piece themed channel names
+const onePieceLocations = [
+    "🏴‍☠️ Going Merry Crew",
+    "⚓ Thousand Sunny Squad",
+    "🏝️ Water 7 Workshop",
+    "🌊 Enies Lobby Expedition",
+    "🏴‍☠️ Alabasta Adventure"
+];
+
+// Store active connections
+const voiceConnections = new Map();
+const audioPlayers = new Map();
+
+// Audio file path
+const audioFilePath = path.join(__dirname, '..', 'sounds', 'The Going Merry One Piece - Cut.ogg');
+
+client.once('ready', () => {
+    console.log(`🏴‍☠️ ${client.user.tag} is ready to sail the Grand Line!`);
+    console.log(`📊 Serving ${client.guilds.cache.size} servers`);
+    console.log(`🔧 Environment: ${process.env.NODE_ENV || 'development'}`);
+    
+    // Check environment variables
+    console.log(`📝 CREATE_CHANNEL_NAME: "${process.env.CREATE_CHANNEL_NAME || '🏴‍☠️ Set Sail Together'}"`);
+    console.log(`📂 CATEGORY_NAME: "${process.env.CATEGORY_NAME || '🌊 Grand Line Voice Channels'}"`);
+    
+    // Verify audio file exists
+    console.log(`🎵 Checking audio file at: ${audioFilePath}`);
+    if (!fs.existsSync(audioFilePath)) {
+        console.error('❌ Audio file not found!');
+        console.log('Expected location:', audioFilePath);
+        console.log('Make sure the file exists and is named exactly: "The Going Merry One Piece - Cut.ogg"');
+    } else {
+        const stats = fs.statSync(audioFilePath);
+        console.log(`✅ Audio file found! Size: ${(stats.size / 1024 / 1024).toFixed(2)} MB`);
     }
-
-    setupEventListeners() {
-        this.client.once('ready', () => {
-            console.log(`✅ Pirate Bot is ready! Logged in as ${this.client.user.tag} 🏴‍☠️`);
-            console.log(`⚓ Create channel name: "${config.createChannelName}"`);
-            console.log(`🎵 Audio support: ${this.hasVoiceSupport ? 'ENABLED' : 'DISABLED'}`);
-            this.setupGuilds();
-        });
-
-        this.client.on('voiceStateUpdate', (oldState, newState) => {
-            console.log(`🎤 Voice state update: ${newState.member?.user.tag || 'Unknown'}`);
-            console.log(`📞 Joined: ${newState.channel?.name || 'None'} | Left: ${oldState.channel?.name || 'None'}`);
-            this.handleVoiceStateUpdate(oldState, newState);
-        });
-
-        this.client.on('error', console.error);
-    }
-
-    async setupGuilds() {
-        for (const guild of this.client.guilds.cache.values()) {
-            await this.setupGuild(guild);
-        }
-    }
-
-    async setupGuild(guild) {
-        try {
-            console.log(`🏗️ Setting up guild: ${guild.name}`);
-            
-            // Find the Community category
-            const communityCategory = guild.channels.cache.find(
-                c => c.name === '✦✗✦ Community ✦✗✦' && c.type === ChannelType.GuildCategory
-            );
-            
-            if (!communityCategory) {
-                console.log(`⚠️ Could not find "✦✗✦ Community ✦✗✦" category`);
-            } else {
-                console.log(`📁 Found Community category: ${communityCategory.name}`);
+    
+    // List all channels in all guilds (for debugging)
+    debugLog('Scanning all channels...');
+    client.guilds.cache.forEach(guild => {
+        debugLog(`Guild: ${guild.name}`);
+        guild.channels.cache.forEach(channel => {
+            if (channel.type === ChannelType.GuildVoice) {
+                debugLog(`  Voice Channel: "${channel.name}"`);
             }
-            
-            // Check if join channel already exists
-            let createChannel = guild.channels.cache.find(
-                c => c.name === config.createChannelName && c.type === ChannelType.GuildVoice
-            );
+        });
+    });
+});
 
-            if (!createChannel) {
-                createChannel = await guild.channels.create({
-                    name: config.createChannelName,
+client.on('voiceStateUpdate', async (oldState, newState) => {
+    const createChannelName = process.env.CREATE_CHANNEL_NAME || '🏴‍☠️ Set Sail Together';
+    const categoryName = process.env.CATEGORY_NAME || '🌊 Grand Line Voice Channels';
+    const deleteDelay = parseInt(process.env.DELETE_DELAY) || 5000;
+
+    // Debug logging
+    console.log('\n🔄 Voice State Update Detected:');
+    console.log(`User: ${newState.member?.displayName || 'Unknown'}`);
+    console.log(`Old Channel: ${oldState.channel?.name || 'None'}`);
+    console.log(`New Channel: ${newState.channel?.name || 'None'}`);
+    console.log(`Looking for channel named: "${createChannelName}"`);
+
+    // User joined a channel
+    if (newState.channel) {
+        console.log(`✅ User joined: "${newState.channel.name}"`);
+        console.log(`🔍 Checking if "${newState.channel.name}" === "${createChannelName}"`);
+        
+        if (newState.channel.name === createChannelName) {
+            console.log('🎯 MATCH! User joined the create channel!');
+            
+            try {
+                const guild = newState.guild;
+                const member = newState.member;
+                
+                console.log(`🏴‍☠️ Creating new crew for ${member.displayName}...`);
+                
+                // Check if user is in a category and use that, otherwise find/create our category
+                let category;
+                const userCurrentCategory = newState.channel.parent;
+                
+                if (userCurrentCategory) {
+                    console.log(`📂 User is in category: "${userCurrentCategory.name}"`);
+                    console.log(`🤔 Should we use this category or create our own?`);
+                    
+                    // Use the same category as the trigger channel
+                    category = userCurrentCategory;
+                    console.log(`✅ Using existing category: "${category.name}"`);
+                } else {
+                    // Find or create our category
+                    category = guild.channels.cache.find(c => c.name === categoryName && c.type === ChannelType.GuildCategory);
+                    if (!category) {
+                        console.log(`📁 Creating category: ${categoryName}`);
+                        category = await guild.channels.create({
+                            name: categoryName,
+                            type: ChannelType.GuildCategory,
+                        });
+                    } else {
+                        console.log(`📁 Found existing category: ${categoryName}`);
+                    }
+                }
+
+                // Create new voice channel
+                const randomName = onePieceLocations[Math.floor(Math.random() * onePieceLocations.length)];
+                console.log(`🚢 Creating channel: ${randomName} in category: ${category.name}`);
+                
+                const newChannel = await guild.channels.create({
+                    name: randomName,
                     type: ChannelType.GuildVoice,
-                    parent: communityCategory?.id,
+                    parent: category.id,
                     permissionOverwrites: [
                         {
-                            id: guild.roles.everyone.id,
-                            allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.Connect]
+                            id: member.id,
+                            allow: [
+                                PermissionFlagsBits.ManageChannels,
+                                PermissionFlagsBits.MoveMembers,
+                                PermissionFlagsBits.MuteMembers,
+                                PermissionFlagsBits.DeafenMembers
+                            ]
                         }
                     ]
                 });
-                console.log(`⚓ Created new join channel: ${config.createChannelName}`);
-            } else {
-                console.log(`⚓ Using existing join channel: ${config.createChannelName}`);
+
+                console.log(`✅ Channel created successfully: ${newChannel.name}`);
+
+                // Move user to new channel
+                console.log(`🔄 Moving ${member.displayName} to new channel...`);
+                await member.voice.setChannel(newChannel);
+                console.log(`✅ User moved successfully!`);
+
+                // Play audio
+                console.log(`🎵 Starting audio playback...`);
+                await playAudio(newChannel, member);
+
+            } catch (error) {
+                console.error('❌ Error in voice state update:', error);
             }
-
-            await this.cleanupEmptyChannels(guild);
-            console.log(`✅ Guild setup complete for: ${guild.name}`);
-
-        } catch (error) {
-            console.error(`❌ Error setting up guild ${guild.name}:`, error);
+        } else {
+            console.log('❌ Channel name does not match. No action taken.');
         }
     }
 
-    async handleVoiceStateUpdate(oldState, newState) {
-        const guild = newState.guild || oldState.guild;
+    // Handle channel cleanup
+    if (oldState.channel && 
+        oldState.channel.parent && 
+        oldState.channel.parent.name === categoryName &&
+        oldState.channel.name !== createChannelName) {
         
-        if (newState.channel) {
-            await this.handleChannelJoin(newState, guild);
-        }
-
-        if (oldState.channel) {
-            await this.handleChannelLeave(oldState, guild);
-        }
-    }
-
-    async handleChannelJoin(newState, guild) {
-        const channel = newState.channel;
+        console.log(`🧹 Checking if ${oldState.channel.name} needs cleanup...`);
         
-        if (channel.name === config.createChannelName) {
-            console.log(`🚢 AHOY! ${newState.member.user.tag} joined the crew recruitment channel!`);
+        if (oldState.channel.members.size === 0) {
+            console.log(`⏰ Empty channel detected. Scheduling cleanup in ${deleteDelay}ms...`);
             
-            // Create new voice channel FIRST, then move user, THEN play sound
-            await this.createNewVoiceChannel(newState.member, guild);
-        }
-
-        if (this.deleteTimers.has(channel.id)) {
-            clearTimeout(this.deleteTimers.get(channel.id));
-            this.deleteTimers.delete(channel.id);
-            console.log(`⏸️ Cancelled disbanding ${channel.name} - new crew member joined!`);
-        }
-    }
-
-    async handleChannelLeave(oldState, guild) {
-        const channel = oldState.channel;
-        
-        if (this.createdChannels.has(channel.id) && channel.members.size === 0) {
-            const timer = setTimeout(async () => {
+            setTimeout(async () => {
                 try {
-                    const currentChannel = guild.channels.cache.get(channel.id);
-                    if (currentChannel && currentChannel.members.size === 0) {
-                        await currentChannel.delete('Crew disbanded - setting sail elsewhere 🌊');
-                        this.createdChannels.delete(channel.id);
-                        this.usedChannelNames.delete(channel.name);
-                        console.log(`🌊 Disbanded empty crew: ${channel.name}`);
+                    if (oldState.channel.members.size === 0) {
+                        const connectionKey = `${oldState.channel.guild.id}-${oldState.channel.id}`;
+                        
+                        // Clean up voice connection
+                        if (voiceConnections.has(connectionKey)) {
+                            console.log(`🔌 Cleaning up voice connection...`);
+                            const connection = voiceConnections.get(connectionKey);
+                            connection.destroy();
+                            voiceConnections.delete(connectionKey);
+                        }
+                        
+                        // Clean up audio player
+                        if (audioPlayers.has(connectionKey)) {
+                            console.log(`🎵 Stopping audio player...`);
+                            const player = audioPlayers.get(connectionKey);
+                            player.stop();
+                            audioPlayers.delete(connectionKey);
+                        }
+
+                        await oldState.channel.delete();
+                        console.log(`🗑️ Deleted empty crew: ${oldState.channel.name}`);
+                    } else {
+                        console.log(`👥 Channel no longer empty, keeping it.`);
                     }
                 } catch (error) {
-                    console.error(`❌ Error deleting channel ${channel.name}:`, error);
+                    console.error('❌ Error during cleanup:', error);
                 }
-                this.deleteTimers.delete(channel.id);
-            }, config.deleteDelay);
-
-            this.deleteTimers.set(channel.id, timer);
-            console.log(`⏰ Crew ${channel.name} will disband in ${config.deleteDelay/1000}s if no one joins`);
+            }, deleteDelay);
         }
     }
+});
 
-    async playJoinSound(channel, guild) {
-        if (!this.hasVoiceSupport || !voiceModule) {
-            console.log(`🎵 *The Going Merry bell rings welcoming the new crew* 🔔⚓`);
+async function playAudio(channel, member) {
+    console.log(`🎵 playAudio() called for channel: ${channel.name}`);
+    
+    try {
+        // Check if audio file exists
+        if (!fs.existsSync(audioFilePath)) {
+            console.error('❌ Audio file not found, cannot play audio');
             return;
         }
 
-        try {
-            console.log(`🎵 Playing The Going Merry welcome sound in ${channel.name}...`);
-            
-            const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, VoiceConnectionStatus } = voiceModule;
-            
-            // Join the voice channel
-            const connection = joinVoiceChannel({
-                channelId: channel.id,
-                guildId: guild.id,
-                adapterCreator: guild.voiceAdapterCreator,
-            });
+        console.log(`🔌 Joining voice channel: ${channel.name}`);
 
-            const connectionKey = `${guild.id}-${channel.id}`;
-            this.audioConnections.set(connectionKey, connection);
+        // Create voice connection
+        const connection = joinVoiceChannel({
+            channelId: channel.id,
+            guildId: channel.guild.id,
+            adapterCreator: channel.guild.voiceAdapterCreator,
+        });
 
-            // Set a simple timer - play for 10 seconds then disconnect
-            console.log(`🎤 Bot joining ${channel.name} to play Going Merry sound! ⚓`);
+        // Store connection
+        const connectionKey = `${channel.guild.id}-${channel.id}`;
+        voiceConnections.set(connectionKey, connection);
+        console.log(`💾 Stored voice connection with key: ${connectionKey}`);
+
+        // Handle connection events
+        connection.on(VoiceConnectionStatus.Ready, () => {
+            console.log('✅ Voice connection is ready!');
             
-            // Wait for connection to be ready
-            connection.on(VoiceConnectionStatus.Ready, async () => {
-                console.log(`🎤 Bot connected! Playing Going Merry sound... 🚢`);
+            try {
+                // Create audio player and resource
+                console.log(`🎼 Creating audio player and resource...`);
+                const player = createAudioPlayer();
+                const resource = createAudioResource(audioFilePath, {
+                    inlineVolume: true
+                });
                 
-                try {
-                    // Create a simple audio player
-                    const player = createAudioPlayer();
-                    
-                    // Try to create audio resource without FFmpeg
-                    const resource = createAudioResource('./sounds/The Going Merry One Piece - Cut.mp3');
-                    
-                    // Subscribe player to connection
-                    connection.subscribe(player);
-                    
-                    // Play the audio
-                    player.play(resource);
-                    console.log(`🎶 🚢 Going Merry sound is playing! ⚓`);
-                    
-                    // Set a fixed duration (10 seconds) then disconnect
-                    setTimeout(() => {
-                        console.log(`🎵 Going Merry sound playback complete!`);
-                        if (this.audioConnections.has(connectionKey)) {
-                            connection.destroy();
-                            this.audioConnections.delete(connectionKey);
-                            console.log(`⚓ Disconnected from ${channel.name} after playing sound`);
-                        }
-                    }, 10000); // 10 seconds
-                    
-                } catch (audioError) {
-                    console.log(`⚠️ Audio error: ${audioError.message}`);
-                    console.log(`🎵 *Fallback: The Going Merry bell rings* 🔔⚓`);
-                    
-                    // Disconnect after 3 seconds if audio fails
-                    setTimeout(() => {
-                        if (this.audioConnections.has(connectionKey)) {
-                            connection.destroy();
-                            this.audioConnections.delete(connectionKey);
-                            console.log(`⚓ Disconnected after audio error`);
-                        }
-                    }, 3000);
-                }
-            });
+                // Set volume
+                resource.volume.setVolume(0.5);
+                console.log(`🔊 Volume set to 50%`);
+                
+                // Store player
+                audioPlayers.set(connectionKey, player);
 
-            // Handle connection errors
-            connection.on('error', (error) => {
-                console.error(`🎤 Connection error: ${error.message}`);
-                if (this.audioConnections.has(connectionKey)) {
-                    this.audioConnections.delete(connectionKey);
-                }
-            });
+                // Play the audio
+                console.log(`▶️ Starting audio playback...`);
+                player.play(resource);
+                connection.subscribe(player);
 
-            // Handle unexpected disconnections
-            connection.on(VoiceConnectionStatus.Disconnected, () => {
-                console.log(`🎤 Connection lost to ${channel.name}`);
-                if (this.audioConnections.has(connectionKey)) {
-                    this.audioConnections.delete(connectionKey);
-                }
-            });
-
-        } catch (error) {
-            console.log(`⚠️ Could not join voice channel: ${error.message}`);
-            console.log(`🎵 *Fallback: The Going Merry bell rings across the seas* 🔔⚓`);
-        }
-    }
-
-    async createNewVoiceChannel(member, guild) {
-        try {
-            console.log(`🚧 Creating new pirate crew for ${member.user.tag}...`);
-            
-            const channelName = this.getRandomChannelName();
-            console.log(`🎯 Selected destination: ${channelName}`);
-            
-            // Find the join channel for positioning
-            const joinChannel = guild.channels.cache.find(
-                c => c.name === config.createChannelName && c.type === ChannelType.GuildVoice
-            );
-            
-            // Find the Community category for proper placement
-            const communityCategory = guild.channels.cache.find(
-                c => c.name === '✦✗✦ Community ✦✗✦' && c.type === ChannelType.GuildCategory
-            );
-            
-            // Try creating in category first, fallback to no category if permission denied
-            let newChannel;
-            try {
-                newChannel = await guild.channels.create({
-                    name: channelName,
-                    type: ChannelType.GuildVoice,
-                    parent: communityCategory?.id,
-                    permissionOverwrites: [
-                        {
-                            id: guild.roles.everyone.id,
-                            allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.Connect]
-                        },
-                        {
-                            id: member.id,
-                            allow: [
-                                PermissionFlagsBits.ViewChannel,
-                                PermissionFlagsBits.Connect,
-                                PermissionFlagsBits.ManageChannels,
-                                PermissionFlagsBits.MoveMembers
-                            ]
-                        }
-                    ]
+                // Handle player events
+                player.on(AudioPlayerStatus.Playing, () => {
+                    console.log(`🎵 ✅ Audio is now playing in ${channel.name}!`);
                 });
-                console.log(`📁 Created ${channelName} in Community category`);
-            } catch (categoryError) {
-                console.log(`⚠️ Cannot create in Community category, trying without category...`);
-                newChannel = await guild.channels.create({
-                    name: channelName,
-                    type: ChannelType.GuildVoice,
-                    permissionOverwrites: [
-                        {
-                            id: guild.roles.everyone.id,
-                            allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.Connect]
-                        },
-                        {
-                            id: member.id,
-                            allow: [
-                                PermissionFlagsBits.ViewChannel,
-                                PermissionFlagsBits.Connect,
-                                PermissionFlagsBits.ManageChannels,
-                                PermissionFlagsBits.MoveMembers
-                            ]
-                        }
-                    ]
+
+                player.on(AudioPlayerStatus.Idle, () => {
+                    console.log(`🎵 Audio finished playing in ${channel.name}`);
                 });
-                console.log(`📁 Created ${channelName} in main channel list (fallback)`);
+
+                player.on('error', error => {
+                    console.error('❌ Audio player error:', error);
+                });
+
+            } catch (audioError) {
+                console.error('❌ Error setting up audio:', audioError);
             }
+        });
 
-            // Position the channel right below the join channel
-            if (joinChannel) {
-                try {
-                    await newChannel.setPosition(joinChannel.position + 1);
-                    console.log(`📍 Positioned ${channelName} right below ${joinChannel.name}`);
-                } catch (posError) {
-                    console.log(`⚠️ Could not set position: ${posError.message}`);
-                }
-            }
+        connection.on(VoiceConnectionStatus.Connecting, () => {
+            console.log('🔄 Connecting to voice channel...');
+        });
 
-            this.createdChannels.add(newChannel.id);
-            
-            console.log(`🚢 Moving Captain ${member.user.tag} to ${channelName}`);
-            await member.voice.setChannel(newChannel);
+        connection.on(VoiceConnectionStatus.Disconnected, () => {
+            console.log(`🔌 Disconnected from voice channel: ${channel.name}`);
+        });
 
-            console.log(`🏴‍☠️ NEW PIRATE CREW FORMED: ${channelName} - Captain ${member.user.tag}! ⚓`);
+        connection.on('error', error => {
+            console.error('❌ Voice connection error:', error);
+        });
 
-            // NOW play the welcome sound in the NEW channel and WAIT for it to finish
-            setTimeout(async () => {
-                await this.playJoinSound(newChannel, guild);
-            }, 1000); // 1 second delay to ensure user is moved
-
-        } catch (error) {
-            console.error(`❌ Failed to create pirate crew for ${member.user.tag}:`, error);
-            console.error(`Error details:`, error.message);
-        }
-    }
-
-    getRandomChannelName() {
-        const availableNames = onePieceChannels.filter(name => !this.usedChannelNames.has(name));
-        
-        if (availableNames.length === 0) {
-            console.log(`🔄 All ${onePieceChannels.length} One Piece locations visited! Resetting the Grand Line...`);
-            this.usedChannelNames.clear();
-            availableNames.push(...onePieceChannels);
-        }
-        
-        const randomName = availableNames[Math.floor(Math.random() * availableNames.length)];
-        this.usedChannelNames.add(randomName);
-        
-        return randomName;
-    }
-
-    async cleanupEmptyChannels(guild) {
-        const channels = guild.channels.cache.filter(
-            c => c.type === ChannelType.GuildVoice && 
-                onePieceChannels.includes(c.name) &&
-                c.members.size === 0 &&
-                c.name !== config.createChannelName
-        );
-
-        if (channels.size > 0) {
-            console.log(`🧹 Cleaning up ${channels.size} abandoned pirate ships...`);
-        }
-
-        for (const channel of channels.values()) {
-            try {
-                await channel.delete('Cleanup abandoned crew on startup 🏴‍☠️');
-                console.log(`🧹 Cleaned up: ${channel.name}`);
-            } catch (error) {
-                console.error(`❌ Error cleaning up ${channel.name}:`, error);
-            }
-        }
-    }
-
-    async start() {
-        try {
-            await this.client.login(config.token);
-        } catch (error) {
-            console.error('❌ Failed to login:', error);
-            process.exit(1);
-        }
-    }
-
-    async stop() {
-        console.log('🛑 The pirate crew is disbanding...');
-        
-        // Clear all timers
-        for (const timer of this.deleteTimers.values()) {
-            clearTimeout(timer);
-        }
-        
-        // Disconnect from all voice channels
-        for (const connection of this.audioConnections.values()) {
-            connection.destroy();
-        }
-        this.audioConnections.clear();
-        
-        await this.client.destroy();
+    } catch (error) {
+        console.error('❌ Error in playAudio function:', error);
     }
 }
 
-module.exports = DynamicVoiceBot;
+// Enhanced error handling
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
+process.on('uncaughtException', (error) => {
+    console.error('❌ Uncaught Exception:', error);
+});
+
+// Railway-specific process handling
+process.on('SIGINT', gracefulShutdown);
+process.on('SIGTERM', gracefulShutdown);
+
+function gracefulShutdown() {
+    console.log('\n🌊 Bot shutting down gracefully...');
+    
+    voiceConnections.forEach((connection, key) => {
+        console.log(`🔌 Destroying connection: ${key}`);
+        try {
+            connection.destroy();
+        } catch (err) {
+            console.log(`Error destroying connection ${key}:`, err.message);
+        }
+    });
+    
+    audioPlayers.forEach((player, key) => {
+        console.log(`🎵 Stopping player: ${key}`);
+        try {
+            player.stop();
+        } catch (err) {
+            console.log(`Error stopping player ${key}:`, err.message);
+        }
+    });
+    
+    client.destroy();
+    console.log('👋 Goodbye!');
+    process.exit(0);
+}
+
+// Keep the process alive
+setInterval(() => {
+    console.log(`🏴‍☠️ Bot is alive - ${new Date().toISOString()}`);
+}, 300000); // Log every 5 minutes
+
+console.log('🚀 Starting bot...');
+console.log('🔑 Token provided:', process.env.DISCORD_TOKEN ? 'Yes' : 'No');
+
+client.login(process.env.DISCORD_TOKEN);
