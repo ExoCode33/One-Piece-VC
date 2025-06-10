@@ -2,21 +2,12 @@ const { Client, GatewayIntentBits, ChannelType, PermissionFlagsBits } = require(
 const config = require('../../config/config');
 const { onePieceChannels } = require('../../config/channels');
 
-// Try to import voice module and ffmpeg
+// Try to import voice module
 let voiceModule = null;
-let ffmpegPath = null;
 
 try {
     voiceModule = require('@discordjs/voice');
     console.log('🎵 Voice module loaded successfully!');
-    
-    // Try to load ffmpeg-static
-    try {
-        ffmpegPath = require('ffmpeg-static');
-        console.log('🎬 FFmpeg loaded successfully!');
-    } catch (ffmpegError) {
-        console.log('⚠️ FFmpeg not available');
-    }
 } catch (error) {
     console.log('⚠️ Voice module not available, running without audio');
 }
@@ -181,101 +172,73 @@ class DynamicVoiceBot {
             const connectionKey = `${guild.id}-${channel.id}`;
             this.audioConnections.set(connectionKey, connection);
 
-            return new Promise((resolve) => {
-                let hasStartedPlaying = false;
-                let timeoutId = null;
-
-                // Create the cleanup function
-                const cleanup = () => {
-                    if (timeoutId) clearTimeout(timeoutId);
-                    if (this.audioConnections.has(connectionKey)) {
-                        connection.destroy();
-                        this.audioConnections.delete(connectionKey);
-                        console.log(`⚓ Disconnected from ${channel.name}`);
-                    }
-                    resolve();
-                };
-
-                // Set maximum timeout (30 seconds)
-                timeoutId = setTimeout(() => {
-                    console.log(`⏰ Audio timeout after 30 seconds - disconnecting from ${channel.name}`);
-                    cleanup();
-                }, 30000);
-
-                // Handle connection ready
-                connection.on(VoiceConnectionStatus.Ready, () => {
-                    console.log(`🎤 Bot connected to ${channel.name} - Preparing to play Going Merry sound! ⚓`);
+            // Set a simple timer - play for 10 seconds then disconnect
+            console.log(`🎤 Bot joining ${channel.name} to play Going Merry sound! ⚓`);
+            
+            // Wait for connection to be ready
+            connection.on(VoiceConnectionStatus.Ready, async () => {
+                console.log(`🎤 Bot connected! Playing Going Merry sound... 🚢`);
+                
+                try {
+                    // Create a simple audio player
+                    const player = createAudioPlayer();
                     
-                    try {
-                        // Create audio player and resource with FFmpeg
-                        const player = createAudioPlayer();
-                        
-                        // Create audio resource with FFmpeg path if available
-                        const resourceOptions = {
-                            inlineVolume: true
-                        };
-                        if (ffmpegPath) {
-                            resourceOptions.inputType = voiceModule.StreamType.Arbitrary;
+                    // Try to create audio resource (simpler approach)
+                    const resource = createAudioResource('./sounds/The Going Merry One Piece - Cut.mp3', {
+                        inlineVolume: true
+                    });
+                    
+                    // Subscribe player to connection
+                    connection.subscribe(player);
+                    
+                    // Play the audio
+                    player.play(resource);
+                    console.log(`🎶 🚢 Going Merry sound is playing! ⚓`);
+                    
+                    // Set a fixed duration (10 seconds) then disconnect
+                    setTimeout(() => {
+                        console.log(`🎵 Going Merry sound playback complete!`);
+                        if (this.audioConnections.has(connectionKey)) {
+                            connection.destroy();
+                            this.audioConnections.delete(connectionKey);
+                            console.log(`⚓ Disconnected from ${channel.name} after playing sound`);
                         }
-                        
-                        const resource = createAudioResource('./sounds/The Going Merry One Piece - Cut.mp3', resourceOptions);
-                        
-                        // Subscribe the connection to the player
-                        const subscription = connection.subscribe(player);
-                        
-                        // Handle player events BEFORE playing
-                        player.on(AudioPlayerStatus.Playing, () => {
-                            hasStartedPlaying = true;
-                            console.log(`🎵 Going Merry sound is now playing! 🚢`);
-                        });
-                        
-                        player.on(AudioPlayerStatus.Idle, () => {
-                            if (hasStartedPlaying) {
-                                console.log(`🎵 Going Merry sound finished playing completely!`);
-                                // Wait 2 seconds after sound ends before disconnecting
-                                setTimeout(() => {
-                                    cleanup();
-                                }, 2000);
-                            }
-                        });
-                        
-                        player.on('error', (error) => {
-                            console.error(`🎵 Audio player error:`, error);
-                            cleanup();
-                        });
-
-                        // Start playing the sound
-                        player.play(resource);
-                        console.log(`🎶 🚢 Started playing: The Going Merry One Piece - Cut! ⚓`);
-                        
-                        // If subscription fails, cleanup
-                        if (!subscription) {
-                            console.log(`⚠️ Failed to subscribe player to connection`);
-                            cleanup();
+                    }, 10000); // 10 seconds
+                    
+                } catch (audioError) {
+                    console.log(`⚠️ Audio error: ${audioError.message}`);
+                    console.log(`🎵 *Fallback: The Going Merry bell rings* 🔔⚓`);
+                    
+                    // Disconnect after 3 seconds if audio fails
+                    setTimeout(() => {
+                        if (this.audioConnections.has(connectionKey)) {
+                            connection.destroy();
+                            this.audioConnections.delete(connectionKey);
+                            console.log(`⚓ Disconnected after audio error`);
                         }
-                        
-                    } catch (audioError) {
-                        console.log(`⚠️ Could not play audio file: ${audioError.message}`);
-                        cleanup();
-                    }
-                });
+                    }, 3000);
+                }
+            });
 
-                // Handle connection errors
-                connection.on('error', (error) => {
-                    console.error(`🎤 Voice connection error:`, error);
-                    cleanup();
-                });
+            // Handle connection errors
+            connection.on('error', (error) => {
+                console.error(`🎤 Connection error: ${error.message}`);
+                if (this.audioConnections.has(connectionKey)) {
+                    this.audioConnections.delete(connectionKey);
+                }
+            });
 
-                // Handle disconnect
-                connection.on(VoiceConnectionStatus.Disconnected, () => {
-                    console.log(`🎤 Bot disconnected from ${channel.name}`);
-                    cleanup();
-                });
+            // Handle unexpected disconnections
+            connection.on(VoiceConnectionStatus.Disconnected, () => {
+                console.log(`🎤 Connection lost to ${channel.name}`);
+                if (this.audioConnections.has(connectionKey)) {
+                    this.audioConnections.delete(connectionKey);
+                }
             });
 
         } catch (error) {
             console.log(`⚠️ Could not join voice channel: ${error.message}`);
-            console.log(`🎵 *Fallback: The Going Merry bell rings* 🔔⚓`);
+            console.log(`🎵 *Fallback: The Going Merry bell rings across the seas* 🔔⚓`);
         }
     }
 
