@@ -152,6 +152,29 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
 
                 // Play audio
                 console.log(`🎵 Starting audio playback...`);
+                
+                // SET CLEANUP TIMER BEFORE CALLING playAudio
+                console.log(`⏰ Setting 5-second cleanup timer BEFORE playAudio`);
+                setTimeout(() => {
+                    console.log(`🚨 5-SECOND TIMER FIRED! Bot should leave now`);
+                    
+                    // Nuclear cleanup
+                    voiceConnections.forEach((conn, key) => {
+                        console.log(`🔌 Destroying connection ${key}`);
+                        try { conn.destroy(); } catch (e) { console.log(`Error: ${e.message}`); }
+                    });
+                    
+                    audioPlayers.forEach((player, key) => {
+                        console.log(`🎵 Stopping player ${key}`);
+                        try { player.stop(); } catch (e) { console.log(`Error: ${e.message}`); }
+                    });
+                    
+                    voiceConnections.clear();
+                    audioPlayers.clear();
+                    
+                    console.log(`✅ CLEANUP COMPLETED - Bot should be gone from voice`);
+                }, 5000);
+                
                 await playAudio(newChannel, member);
 
             } catch (error) {
