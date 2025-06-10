@@ -25,35 +25,54 @@ async function playAudio(channel, member) {
         // Create a cleanup function to avoid duplication
         const cleanupConnection = (reason = 'unknown') => {
             console.log(`🧹 Cleaning up connection for ${channel.name} (reason: ${reason})`);
+            console.log(`🔍 Before cleanup - Connection exists: ${voiceConnections.has(connectionKey)}`);
+            console.log(`🔍 Before cleanup - Player exists: ${audioPlayers.has(connectionKey)}`);
             
             try {
                 // Stop audio player first
                 if (audioPlayers.has(connectionKey)) {
                     const player = audioPlayers.get(connectionKey);
+                    console.log(`🎵 Stopping audio player...`);
                     player.stop();
                     audioPlayers.delete(connectionKey);
                     console.log(`🎵 Audio player stopped and removed`);
+                } else {
+                    console.log(`🎵 No audio player to clean up`);
                 }
 
                 // Destroy voice connection
                 if (voiceConnections.has(connectionKey)) {
                     const conn = voiceConnections.get(connectionKey);
+                    console.log(`🔌 Connection status: ${conn.state.status}`);
+                    
                     if (conn.state.status !== VoiceConnectionStatus.Destroyed) {
+                        console.log(`🔌 Destroying voice connection...`);
                         conn.destroy();
                         console.log(`🔌 Voice connection destroyed`);
+                    } else {
+                        console.log(`🔌 Connection already destroyed`);
                     }
                     voiceConnections.delete(connectionKey);
+                    console.log(`🔌 Connection removed from map`);
+                } else {
+                    console.log(`🔌 No voice connection to clean up`);
                 }
                 
                 console.log(`✅ Cleanup completed for ${channel.name}`);
+                console.log(`🔍 After cleanup - Connection exists: ${voiceConnections.has(connectionKey)}`);
+                console.log(`🔍 After cleanup - Player exists: ${audioPlayers.has(connectionKey)}`);
             } catch (error) {
                 console.error('❌ Error during cleanup:', error);
+                console.error('❌ Stack trace:', error.stack);
             }
         };
 
         // Set up the guaranteed disconnect timer FIRST
+        console.log(`⏰ Setting up 7-second force disconnect timer for ${channel.name}`);
         const forceDisconnectTimer = setTimeout(() => {
             console.log(`⏰ 7 seconds elapsed, forcing disconnect from ${channel.name}`);
+            console.log(`🔍 Connection exists: ${voiceConnections.has(connectionKey)}`);
+            console.log(`🔍 Player exists: ${audioPlayers.has(connectionKey)}`);
             cleanupConnection('7-second-timeout');
         }, 7000);
 
