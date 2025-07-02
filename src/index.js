@@ -61,7 +61,8 @@ client.once('ready', () => {
 client.on('voiceStateUpdate', async (oldState, newState) => {
     try {
         // Handle joining the creation channel
-        if (newState.channelId && newState.channel?.name === process.env.CREATE_CHANNEL_NAME) {
+        if (newState.channelId && newState.channel?.name === CREATE_CHANNEL_NAME) {
+            if (DEBUG) console.log(`🔍 User ${newState.member.displayName} joined creation channel: ${CREATE_CHANNEL_NAME}`);
             await handleChannelCreation(newState);
         }
 
@@ -80,14 +81,17 @@ async function handleChannelCreation(voiceState) {
     try {
         // Find or create category
         let category = guild.channels.cache.find(
-            c => c.type === ChannelType.GuildCategory && c.name === process.env.CATEGORY_NAME
+            c => c.type === ChannelType.GuildCategory && c.name === CATEGORY_NAME
         );
         
         if (!category) {
+            if (DEBUG) console.log(`🔍 Creating new category: ${CATEGORY_NAME}`);
             category = await guild.channels.create({
-                name: process.env.CATEGORY_NAME,
+                name: CATEGORY_NAME,
                 type: ChannelType.GuildCategory
             });
+        } else {
+            if (DEBUG) console.log(`🔍 Found existing category: ${CATEGORY_NAME}`);
         }
 
         // Get random pirate name
@@ -163,7 +167,7 @@ async function handleChannelCleanup(oldState) {
                 // Channel might already be deleted
                 createdChannels.delete(channel.id);
             }
-        }, parseInt(process.env.DELETE_DELAY) || 5000);
+                        }, parseInt(process.env.DELETE_DELAY) || 5000);
     }
 }
 
@@ -193,7 +197,7 @@ async function playWelcomeSound(voiceChannel) {
             resource = createAudioResource(soundPath, { 
                 inlineVolume: true 
             });
-            resource.volume.setVolume(0.4);
+            resource.volume.setVolume(AUDIO_VOLUME);
         } catch (resourceError) {
             console.log('🎵 Trying alternative resource creation...');
             // Second try: Using file stream
@@ -201,7 +205,7 @@ async function playWelcomeSound(voiceChannel) {
             resource = createAudioResource(fs.createReadStream(soundPath), { 
                 inlineVolume: true 
             });
-            resource.volume.setVolume(0.4);
+            resource.volume.setVolume(AUDIO_VOLUME);
         }
 
         // Subscribe first, then play (important order!)
@@ -252,4 +256,7 @@ process.on('unhandledRejection', error => {
 });
 
 // Login
-client.login(process.env.DISCORD_TOKEN);
+client.login(process.env.DISCORD_TOKEN).catch(error => {
+    console.error('❌ Failed to login:', error);
+    process.exit(1);
+});
