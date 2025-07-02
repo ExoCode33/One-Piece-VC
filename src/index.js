@@ -1,5 +1,5 @@
 const { Client, GatewayIntentBits, ChannelType, PermissionsBitField } = require('discord.js');
-const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus } = require('@discordjs/voice');
+const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, StreamType } = require('@discordjs/voice');
 const fs = require('fs');
 const path = require('path');
 require('dotenv').config();
@@ -167,8 +167,12 @@ async function playWelcomeSound(voiceChannel) {
         
         if (!fs.existsSync(soundPath)) {
             console.log('🎵 Sound file not found:', soundPath);
+            console.log('🎵 Expected path:', soundPath);
+            console.log('🎵 Current directory:', __dirname);
             return;
         }
+
+        console.log('🎵 Playing sound:', soundPath);
 
         const connection = joinVoiceChannel({
             channelId: voiceChannel.id,
@@ -177,19 +181,48 @@ async function playWelcomeSound(voiceChannel) {
         });
 
         const player = createAudioPlayer();
-        const resource = createAudioResource(soundPath);
         
-        player.play(resource);
-        connection.subscribe(player);
+        // For .ogg files, specify the input type for better performance
+        const resource = createAudioResource(soundPath, {
+            inputType: StreamType.OggOpus,
+        });
+        
+        // Add connection ready handler
+        connection.on('ready', () => {
+            console.log('🎵 Voice connection ready, starting playback');
+            player.play(resource);
+            connection.subscribe(player);
+        });
+
+        // Add player event handlers
+        player.on(AudioPlayerStatus.Playing, () => {
+            console.log('🎵 Audio started playing');
+        });
 
         player.on(AudioPlayerStatus.Idle, () => {
-            connection.destroy();
+            console.log('🎵 Audio finished playing');
+            setTimeout(() => {
+                connection.destroy();
+            }, 1000);
         });
 
         player.on('error', (error) => {
-            console.error('Audio player error:', error);
+            console.error('🎵 Audio player error:', error);
             connection.destroy();
         });
+
+        // Add connection error handler
+        connection.on('error', (error) => {
+            console.error('🎵 Voice connection error:', error);
+        });
+
+        // Timeout fallback to prevent stuck connections
+        setTimeout(() => {
+            if (connection.state.status !== 'destroyed') {
+                console.log('🎵 Audio timeout, destroying connection');
+                connection.destroy();
+            }
+        }, 30000); // 30 second timeout
 
     } catch (error) {
         console.error('Error playing welcome sound:', error);
