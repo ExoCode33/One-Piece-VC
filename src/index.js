@@ -1,5 +1,5 @@
 const { Client, GatewayIntentBits, ChannelType, PermissionsBitField } = require('discord.js');
-const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, VoiceConnectionStatus } = require('@discordjs/voice');
+const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, VoiceConnectionStatus, generateDependencyReport } = require('@discordjs/voice');
 const fs = require('fs');
 const path = require('path');
 require('dotenv').config();
@@ -52,6 +52,10 @@ let createdChannels = new Map();
 
 client.once('ready', () => {
     console.log(`🏴‍☠️ ${client.user.tag} has set sail on the Grand Line!`);
+    
+    // Check voice dependencies
+    console.log('\n🔍 Voice Dependencies Check:');
+    console.log(generateDependencyReport());
 });
 
 client.on('voiceStateUpdate', async (oldState, newState) => {
@@ -181,15 +185,28 @@ async function playWelcomeSound(voiceChannel) {
         });
 
         const player = createAudioPlayer();
-        const resource = createAudioResource(soundPath, { 
-            inlineVolume: true 
-        });
         
-        // Set volume like the original
-        resource.volume.setVolume(0.4);
+        // Try different resource creation approaches
+        let resource;
+        try {
+            // First try: Simple file path (like your original)
+            resource = createAudioResource(soundPath, { 
+                inlineVolume: true 
+            });
+            resource.volume.setVolume(0.4);
+        } catch (resourceError) {
+            console.log('🎵 Trying alternative resource creation...');
+            // Second try: Using file stream
+            const fs = require('fs');
+            resource = createAudioResource(fs.createReadStream(soundPath), { 
+                inlineVolume: true 
+            });
+            resource.volume.setVolume(0.4);
+        }
 
-        player.play(resource);
+        // Subscribe first, then play (important order!)
         connection.subscribe(player);
+        player.play(resource);
 
         // Handle player events
         player.on(AudioPlayerStatus.Playing, () => {
@@ -199,29 +216,29 @@ async function playWelcomeSound(voiceChannel) {
         player.on(AudioPlayerStatus.Idle, () => {
             console.log('🎵 Finished playing welcome sound');
             setTimeout(() => {
-                connection.destroy();
+                if (connection.state.status !== 'destroyed') {
+                    connection.destroy();
+                }
             }, 1000);
         });
 
-        player.on('error', (error) => {
-            console.error('🎵 Audio player error:', error);
-            connection.destroy();
-        });
-
-        connection.on('error', (error) => {
-            console.error('🎵 Voice connection error:', error);
-        });
-
-        // Timeout fallback
-        setTimeout(() => {
+        player.on('error', error => {
+            console.error(`❌ Audio player error:`, error);
             if (connection.state.status !== 'destroyed') {
-                console.log('🎵 Audio timeout, destroying connection');
                 connection.destroy();
             }
-        }, 30000);
+        });
+
+        connection.on(VoiceConnectionStatus.Disconnected, () => {
+            console.log(`🔌 Disconnected from ${voiceChannel.name}`);
+        });
+
+        connection.on('error', error => {
+            console.error(`❌ Voice connection error:`, error);
+        });
 
     } catch (error) {
-        console.error('Error playing welcome sound:', error);
+        console.error(`❌ Error playing welcome sound:`, error);
     }
 }
 
