@@ -287,24 +287,56 @@ async function playWelcomeSound(channel) {
 
 // Register slash commands
 async function registerCommands() {
+    const sounds = getAvailableSounds();
+    log(`🔍 Found ${sounds.length} sound files for commands`);
+    
     const commands = [
         new SlashCommandBuilder()
             .setName('soundboard')
             .setDescription('Play sounds from the soundboard')
             .addStringOption(option => {
-                const sounds = getAvailableSounds();
                 option
                     .setName('sound')
                     .setDescription('Choose a sound to play')
                     .setRequired(true);
                 
                 // Add sound choices (Discord limits to 25 choices)
-                sounds.slice(0, 25).forEach(sound => {
-                    option.addChoices({ name: sound.name, value: sound.value });
-                });
+                if (sounds.length === 0) {
+                    // Add dummy choice if no sounds found
+                    option.addChoices({ name: 'No sounds found', value: 'none' });
+                } else {
+                    // Add up to 25 sounds
+                    sounds.slice(0, 25).forEach(sound => {
+                        // Clean up the name for Discord (max 100 chars)
+                        const cleanName = sound.name.length > 100 ? sound.name.substring(0, 97) + '...' : sound.name;
+                        option.addChoices({ name: cleanName, value: sound.value });
+                    });
+                    
+                    if (sounds.length > 25) {
+                        log(`⚠️ Warning: ${sounds.length} sounds found, but only showing first 25 in dropdown`);
+                    }
+                }
                 
                 return option;
             })
+            .addIntegerOption(option =>
+                option
+                    .setName('repeat')
+                    .setDescription('How many times to repeat the sound (1-10)')
+                    .setMinValue(1)
+                    .setMaxValue(10)
+                    .setRequired(false)
+            ),
+        
+        new SlashCommandBuilder()
+            .setName('playsound')
+            .setDescription('Play a sound by typing its name (alternative to dropdown)')
+            .addStringOption(option =>
+                option
+                    .setName('filename')
+                    .setDescription('Type the exact filename (e.g., airhorn.ogg)')
+                    .setRequired(true)
+            )
             .addIntegerOption(option =>
                 option
                     .setName('repeat')
@@ -323,6 +355,10 @@ async function registerCommands() {
             .setDescription('List all available sounds'),
             
         new SlashCommandBuilder()
+            .setName('refreshsounds')
+            .setDescription('Refresh the sound list (admin only)'),
+            
+        new SlashCommandBuilder()
             .setName('ping')
             .setDescription('Check if the bot is responsive'),
     ];
@@ -331,6 +367,14 @@ async function registerCommands() {
 
     try {
         log('🔄 Refreshing slash commands...');
+        
+        // Log what sounds we're registering
+        if (sounds.length > 0) {
+            log(`📝 Registering commands with sounds: ${sounds.slice(0, 5).map(s => s.name).join(', ')}${sounds.length > 5 ? '...' : ''}`);
+        } else {
+            log('⚠️ No sound files found - commands will show "No sounds found"');
+        }
+        
         await rest.put(
             Routes.applicationCommands(CLIENT_ID),
             { body: commands }
@@ -338,6 +382,7 @@ async function registerCommands() {
         log('✅ Slash commands registered successfully!');
     } catch (error) {
         console.error('❌ Error registering commands:', error);
+        console.error('Full error:', error.message);
     }
 }
 
@@ -374,7 +419,55 @@ client.on('interactionCreate', async interaction => {
         const soundFile = interaction.options.getString('sound');
         const repeatCount = interaction.options.getInteger('repeat') || 1;
         
+        if (soundFile === 'none') {
+            return interaction.reply({
+                content: '❌ No sound files found! Add .ogg, .mp3, or .wav files to the sounds folder and use `/refreshsounds`.',
+                ephemeral: true
+            });
+        }
+        
         await playSoundboard(interaction, soundFile, repeatCount);
+    }
+    
+    else if (commandName === 'playsound') {
+        const filename = interaction.options.getString('filename');
+        const repeatCount = interaction.options.getInteger('repeat') || 1;
+        
+        // Check if file exists
+        const soundPath = path.join(SOUNDS_DIR, filename);
+        if (!fs.existsSync(soundPath)) {
+            return interaction.reply({
+                content: `❌ Sound file "${filename}" not found! Use \`/sounds\` to see available files.`,
+                ephemeral: true
+            });
+        }
+        
+        await playSoundboard(interaction, filename, repeatCount);
+    }
+    
+    else if (commandName === 'refreshsounds') {
+        // Check if user has admin permissions
+        if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator)) {
+            return interaction.reply({
+                content: '❌ You need administrator permissions to refresh sounds!',
+                ephemeral: true
+            });
+        }
+        
+        await interaction.deferReply({ ephemeral: true });
+        
+        try {
+            await registerCommands();
+            const sounds = getAvailableSounds();
+            await interaction.editReply({
+                content: `✅ Sound commands refreshed! Found ${sounds.length} sound files.\n\n**Note:** You may need to restart Discord or wait a few minutes for the new sounds to appear in the dropdown.`
+            });
+        } catch (error) {
+            console.error('Error refreshing commands:', error);
+            await interaction.editReply({
+                content: '❌ Failed to refresh sound commands. Check console for errors.'
+            });
+        }
     }
     
     else if (commandName === 'stopsound') {
@@ -407,17 +500,38 @@ client.on('interactionCreate', async interaction => {
         
         if (sounds.length === 0) {
             return interaction.reply({
-                content: '❌ No sound files found! Add .ogg, .mp3, or .wav files to the sounds folder.',
+                content: '❌ No sound files found! Add .ogg, .mp3, or .wav files to the sounds folder.\n\n**Steps:**\n1. Add sound files to the `sounds` folder\n2. Use `/refreshsounds` (admin only)\n3. Restart the bot if needed',
                 ephemeral: true
             });
         }
         
-        const soundList = sounds.map((sound, index) => `${index + 1}. **${sound.name}**`).join('\n');
+        // Split into chunks if too many sounds
+        const soundList = sounds.map((sound, index) => `${index + 1}. **${sound.name}** \`(${sound.value})\``).join('\n');
         
-        await interaction.reply({
-            content: `🎵 **Available Sounds (${sounds.length}):**\n\n${soundList}`,
-            ephemeral: true
-        });
+        if (soundList.length > 2000) {
+            // Split into multiple messages if too long
+            const firstHalf = sounds.slice(0, Math.ceil(sounds.length / 2));
+            const secondHalf = sounds.slice(Math.ceil(sounds.length / 2));
+            
+            const firstList = firstHalf.map((sound, index) => `${index + 1}. **${sound.name}** \`(${sound.value})\``).join('\n');
+            
+            await interaction.reply({
+                content: `🎵 **Available Sounds (${sounds.length}) - Part 1:**\n\n${firstList}`,
+                ephemeral: true
+            });
+            
+            const secondList = secondHalf.map((sound, index) => `${firstHalf.length + index + 1}. **${sound.name}** \`(${sound.value})\``).join('\n');
+            
+            await interaction.followUp({
+                content: `🎵 **Available Sounds - Part 2:**\n\n${secondList}\n\n💡 **Tip:** Use \`/playsound filename:sound.ogg\` to play any sound by typing its filename!`,
+                ephemeral: true
+            });
+        } else {
+            await interaction.reply({
+                content: `🎵 **Available Sounds (${sounds.length}):**\n\n${soundList}\n\n💡 **Tip:** Use \`/playsound filename:sound.ogg\` to play any sound by typing its filename!`,
+                ephemeral: true
+            });
+        }
     }
 });
 
