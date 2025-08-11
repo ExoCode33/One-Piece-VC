@@ -1,4 +1,5 @@
 const { Client, GatewayIntentBits, ChannelType, PermissionFlagsBits, SlashCommandBuilder, REST, Routes } = require('discord.js');
+const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, VoiceConnectionStatus } = require('@discordjs/voice');
 const fs = require('fs');
 const path = require('path');
 
@@ -11,6 +12,7 @@ const CLIENT_ID = process.env.CLIENT_ID;
 const CREATE_CHANNEL_NAME = process.env.CREATE_CHANNEL_NAME || '🏴 Set Sail Together';
 const CATEGORY_NAME = process.env.CATEGORY_NAME || '🌊 Grand Line Voice Channels';
 const DELETE_DELAY = parseInt(process.env.DELETE_DELAY) || 5000;
+const AUDIO_VOLUME = parseFloat(process.env.AUDIO_VOLUME) || 0.4;
 const DEBUG = process.env.DEBUG === 'true';
 
 // One Piece themed channel names
@@ -27,7 +29,24 @@ const CREW_NAMES = [
     '🌊 Water 7 Docks',
     '🔥 Marineford War',
     '🏴‍☠️ Thousand Sunny',
-    '⚓ Going Merry'
+    '⚓ Going Merry',
+    '🦈 Arlong Park',
+    '🎪 Buggy\'s Circus',
+    '🍖 Baratie Restaurant',
+    '📚 Ohara Library',
+    '🌙 Zou Elephant',
+    '⚔️ Dressrosa Colosseum',
+    '🎭 Sabaody Archipelago',
+    '🌟 Reverse Mountain',
+    '🐉 Kaido\'s Lair',
+    '🍃 Amazon Lily',
+    '❄️ Drum Island',
+    '🔱 Fishman District',
+    '🌈 Long Ring Island',
+    '🏰 Enies Lobby',
+    '🌺 Rusukaina Island',
+    '🔥 Ace\'s Adventure',
+    '⚡ Enel\'s Ark'
 ];
 
 // Create Discord client
@@ -39,6 +58,14 @@ const client = new Client({
         GatewayIntentBits.MessageContent
     ]
 });
+
+// Track active voice connections and soundboard sessions
+const activeConnections = new Map();
+const soundboardSessions = new Map(); // channelId -> { player, repeatCount, currentFile, timeoutId }
+
+// Sounds directory
+const SOUNDS_DIR = path.join(__dirname, '..', 'sounds');
+const WELCOME_SOUND = path.join(SOUNDS_DIR, 'The Going Merry One Piece - Cut.ogg');
 
 // Helper functions
 function log(message) {
@@ -55,116 +82,218 @@ function getRandomCrewName() {
     return CREW_NAMES[Math.floor(Math.random() * CREW_NAMES.length)];
 }
 
-// Get available Discord soundboard sounds for the guild
-async function getGuildSoundboardSounds(guild) {
-    try {
-        // Fetch guild soundboard sounds
-        const sounds = await guild.soundboardSounds.fetch();
-        return sounds.map(sound => ({
-            id: sound.id,
-            name: sound.name,
-            emoji: sound.emoji,
-            description: `Play ${sound.name}`
-        }));
-    } catch (error) {
-        console.error('❌ Error fetching soundboard sounds:', error);
+// Get available sound files
+function getAvailableSounds() {
+    if (!fs.existsSync(SOUNDS_DIR)) {
+        fs.mkdirSync(SOUNDS_DIR, { recursive: true });
         return [];
+    }
+    
+    return fs.readdirSync(SOUNDS_DIR)
+        .filter(file => file.endsWith('.ogg') || file.endsWith('.mp3') || file.endsWith('.wav'))
+        .map(file => {
+            const name = path.parse(file).name;
+            return {
+                name: name,
+                value: file,
+                description: `Play ${name}`
+            };
+        });
+}
+
+// Stop any existing soundboard session in a channel
+function stopSoundboardSession(channelId) {
+    const session = soundboardSessions.get(channelId);
+    if (session) {
+        if (session.player) {
+            session.player.stop();
+        }
+        if (session.timeoutId) {
+            clearTimeout(session.timeoutId);
+        }
+        soundboardSessions.delete(channelId);
+        debugLog(`🛑 Stopped soundboard session in channel ${channelId}`);
     }
 }
 
-// Play Discord native soundboard sound
-async function playDiscordSoundboard(interaction, soundId, repeatCount = 1) {
+// Play soundboard with repetition
+async function playSoundboard(interaction, soundFile, repeatCount = 1) {
     const member = interaction.member;
     const voiceChannel = member.voice.channel;
     
     if (!voiceChannel) {
         return interaction.reply({
             content: '❌ You need to be in a voice channel to use the soundboard!',
-            flags: 64 // EPHEMERAL flag
+            ephemeral: true
+        });
+    }
+
+    const soundPath = path.join(SOUNDS_DIR, soundFile);
+    if (!fs.existsSync(soundPath)) {
+        return interaction.reply({
+            content: '❌ Sound file not found!',
+            ephemeral: true
         });
     }
 
     try {
+        // Stop any existing session in this channel
+        stopSoundboardSession(voiceChannel.id);
+
         await interaction.deferReply();
 
-        // Find the sound
-        const guild = interaction.guild;
-        const sounds = await guild.soundboardSounds.fetch();
-        const sound = sounds.get(soundId);
-        
-        if (!sound) {
-            return interaction.editReply({
-                content: '❌ Sound not found! Use `/sounds` to see available sounds.'
-            });
-        }
+        const connection = joinVoiceChannel({
+            channelId: voiceChannel.id,
+            guildId: voiceChannel.guild.id,
+            adapterCreator: voiceChannel.guild.voiceAdapterCreator,
+        });
 
-        let playCount = 0;
-        
-        async function playSound() {
-            if (playCount >= repeatCount) {
+        activeConnections.set(voiceChannel.id, connection);
+
+        const player = createAudioPlayer();
+        let currentRepeat = 0;
+
+        // Store session info
+        soundboardSessions.set(voiceChannel.id, {
+            player: player,
+            repeatCount: repeatCount,
+            currentFile: soundFile,
+            timeoutId: null
+        });
+
+        function playSound() {
+            if (currentRepeat >= repeatCount) {
+                // Finished all repetitions
+                setTimeout(() => {
+                    if (activeConnections.has(voiceChannel.id)) {
+                        connection.destroy();
+                        activeConnections.delete(voiceChannel.id);
+                    }
+                    stopSoundboardSession(voiceChannel.id);
+                }, 2000);
                 return;
             }
+
+            const resource = createAudioResource(soundPath, { 
+                inlineVolume: true 
+            });
+            resource.volume.setVolume(AUDIO_VOLUME);
+
+            player.play(resource);
+            currentRepeat++;
             
-            try {
-                // Use Discord's native soundboard API
-                await member.voice.channel.sendSoundboardSound(soundId, member.id);
-                playCount++;
-                
-                debugLog(`🎵 Played Discord soundboard: ${sound.name} (${playCount}/${repeatCount})`);
-                
-                // If more repetitions needed, wait and play again
-                if (playCount < repeatCount) {
-                    setTimeout(() => {
-                        playSound();
-                    }, 2000); // 2 second gap between repetitions
-                }
-            } catch (playError) {
-                console.error('❌ Error playing soundboard sound:', playError);
-                throw playError;
-            }
+            debugLog(`🎵 Playing ${soundFile} (${currentRepeat}/${repeatCount})`);
         }
 
-        await playSound();
+        player.on(AudioPlayerStatus.Idle, () => {
+            // When current playback ends, wait a moment then play again if needed
+            const session = soundboardSessions.get(voiceChannel.id);
+            if (session && currentRepeat < repeatCount) {
+                session.timeoutId = setTimeout(() => {
+                    playSound();
+                }, 1000); // 1 second gap between repetitions
+            }
+        });
 
+        player.on('error', error => {
+            console.error(`❌ Audio player error:`, error);
+            stopSoundboardSession(voiceChannel.id);
+            if (activeConnections.has(voiceChannel.id)) {
+                connection.destroy();
+                activeConnections.delete(voiceChannel.id);
+            }
+        });
+
+        connection.subscribe(player);
+
+        connection.on(VoiceConnectionStatus.Ready, () => {
+            playSound(); // Start playing
+        });
+
+        connection.on(VoiceConnectionStatus.Disconnected, () => {
+            debugLog(`🔌 Disconnected from ${voiceChannel.name}`);
+            activeConnections.delete(voiceChannel.id);
+            stopSoundboardSession(voiceChannel.id);
+        });
+
+        const soundName = path.parse(soundFile).name;
         const repeatText = repeatCount > 1 ? ` (${repeatCount} times)` : '';
+        
         await interaction.editReply({
-            content: `🎵 Playing Discord soundboard: **${sound.name}**${repeatText} in ${voiceChannel.name}!`
+            content: `🎵 Now playing **${soundName}**${repeatText} in ${voiceChannel.name}!`
         });
 
     } catch (error) {
-        console.error(`❌ Error playing Discord soundboard:`, error);
-        
-        let errorMessage = '❌ Failed to play sound.';
-        
-        if (error.code === 50013) {
-            errorMessage += ' Bot needs "Use Soundboard" permission!';
-        } else if (error.code === 40032) {
-            errorMessage += ' Sound not found or unavailable!';
-        } else {
-            errorMessage += ' Make sure the bot has soundboard permissions!';
-        }
-        
-        if (interaction.deferred) {
-            await interaction.editReply({ content: errorMessage });
-        } else {
-            await interaction.reply({ content: errorMessage, flags: 64 });
-        }
+        console.error(`❌ Error playing soundboard:`, error);
+        await interaction.editReply({
+            content: '❌ Failed to play sound. Make sure I have permission to join your voice channel!'
+        });
     }
 }
 
-// Register slash commands with dynamic soundboard choices
-async function registerCommands(guild = null) {
-    let sounds = [];
-    
-    if (guild) {
-        sounds = await getGuildSoundboardSounds(guild);
-        log(`🔍 Found ${sounds.length} Discord soundboard sounds`);
+// Welcome sound function (unchanged)
+async function playWelcomeSound(channel) {
+    try {
+        if (!fs.existsSync(WELCOME_SOUND)) {
+            debugLog(`Welcome sound file not found: ${WELCOME_SOUND}`);
+            return;
+        }
+
+        debugLog(`Playing welcome sound in ${channel.name}`);
+
+        const connection = joinVoiceChannel({
+            channelId: channel.id,
+            guildId: channel.guild.id,
+            adapterCreator: channel.guild.voiceAdapterCreator,
+        });
+
+        activeConnections.set(channel.id, connection);
+
+        const player = createAudioPlayer();
+        const resource = createAudioResource(WELCOME_SOUND, { 
+            inlineVolume: true 
+        });
+        
+        resource.volume.setVolume(AUDIO_VOLUME);
+
+        player.play(resource);
+        connection.subscribe(player);
+
+        player.on(AudioPlayerStatus.Idle, () => {
+            setTimeout(() => {
+                if (activeConnections.has(channel.id)) {
+                    connection.destroy();
+                    activeConnections.delete(channel.id);
+                }
+            }, 1000);
+        });
+
+        player.on('error', error => {
+            console.error(`❌ Audio player error in ${channel.name}:`, error);
+            if (activeConnections.has(channel.id)) {
+                connection.destroy();
+                activeConnections.delete(channel.id);
+            }
+        });
+
+        connection.on(VoiceConnectionStatus.Disconnected, () => {
+            activeConnections.delete(channel.id);
+        });
+
+    } catch (error) {
+        console.error(`❌ Error playing welcome sound:`, error);
     }
+}
+
+// Register slash commands
+async function registerCommands() {
+    const sounds = getAvailableSounds();
+    log(`🔍 Found ${sounds.length} sound files for commands`);
     
     const commands = [
         new SlashCommandBuilder()
             .setName('soundboard')
-            .setDescription('Play sounds from Discord\'s built-in soundboard')
+            .setDescription('Play sounds from the soundboard')
             .addStringOption(option => {
                 option
                     .setName('sound')
@@ -173,12 +302,14 @@ async function registerCommands(guild = null) {
                 
                 // Add sound choices (Discord limits to 25 choices)
                 if (sounds.length === 0) {
-                    option.addChoices({ name: 'No sounds found - upload sounds to server soundboard', value: 'none' });
+                    // Add dummy choice if no sounds found
+                    option.addChoices({ name: 'No sounds found', value: 'none' });
                 } else {
+                    // Add up to 25 sounds
                     sounds.slice(0, 25).forEach(sound => {
-                        const displayName = sound.emoji ? `${sound.emoji} ${sound.name}` : sound.name;
-                        const cleanName = displayName.length > 100 ? displayName.substring(0, 97) + '...' : displayName;
-                        option.addChoices({ name: cleanName, value: sound.id });
+                        // Clean up the name for Discord (max 100 chars)
+                        const cleanName = sound.name.length > 100 ? sound.name.substring(0, 97) + '...' : sound.name;
+                        option.addChoices({ name: cleanName, value: sound.value });
                     });
                     
                     if (sounds.length > 25) {
@@ -191,19 +322,41 @@ async function registerCommands(guild = null) {
             .addIntegerOption(option =>
                 option
                     .setName('repeat')
-                    .setDescription('How many times to repeat the sound (1-5)')
+                    .setDescription('How many times to repeat the sound (1-10)')
                     .setMinValue(1)
-                    .setMaxValue(5)
+                    .setMaxValue(10)
                     .setRequired(false)
             ),
         
         new SlashCommandBuilder()
+            .setName('playsound')
+            .setDescription('Play a sound by typing its name (alternative to dropdown)')
+            .addStringOption(option =>
+                option
+                    .setName('filename')
+                    .setDescription('Type the exact filename (e.g., airhorn.ogg)')
+                    .setRequired(true)
+            )
+            .addIntegerOption(option =>
+                option
+                    .setName('repeat')
+                    .setDescription('How many times to repeat the sound (1-10)')
+                    .setMinValue(1)
+                    .setMaxValue(10)
+                    .setRequired(false)
+            ),
+        
+        new SlashCommandBuilder()
+            .setName('stopsound')
+            .setDescription('Stop the current soundboard playback'),
+            
+        new SlashCommandBuilder()
             .setName('sounds')
-            .setDescription('List all available Discord soundboard sounds'),
+            .setDescription('List all available sounds'),
             
         new SlashCommandBuilder()
             .setName('refreshsounds')
-            .setDescription('Refresh the Discord soundboard list (admin only)'),
+            .setDescription('Refresh the sound list (admin only)'),
             
         new SlashCommandBuilder()
             .setName('ping')
@@ -215,10 +368,11 @@ async function registerCommands(guild = null) {
     try {
         log('🔄 Refreshing slash commands...');
         
+        // Log what sounds we're registering
         if (sounds.length > 0) {
-            log(`📝 Registering commands with Discord soundboard sounds: ${sounds.slice(0, 3).map(s => s.name).join(', ')}${sounds.length > 3 ? '...' : ''}`);
+            log(`📝 Registering commands with sounds: ${sounds.slice(0, 5).map(s => s.name).join(', ')}${sounds.length > 5 ? '...' : ''}`);
         } else {
-            log('⚠️ No Discord soundboard sounds found - users need to upload sounds to server');
+            log('⚠️ No sound files found - commands will show "No sounds found"');
         }
         
         await rest.put(
@@ -234,18 +388,18 @@ async function registerCommands(guild = null) {
 
 // Bot event handlers
 client.once('ready', async () => {
-    log(`Discord Soundboard Bot is ready to set sail!`);
+    log(`One Piece Voice Bot is ready to set sail!`);
     log(`⚓ Logged in as ${client.user.tag}`);
-    log(`🎵 Using Discord's native soundboard system`);
-    log(`💡 Users need to upload sounds to server soundboard for bot to use them`);
+    log(`🎵 Soundboard enabled with ${getAvailableSounds().length} sounds`);
     
-    // Register commands with the first guild (for guild-specific soundboards)
-    const guild = client.guilds.cache.first();
-    if (guild) {
-        await registerCommands(guild);
-    } else {
-        await registerCommands();
+    // Create sounds directory if it doesn't exist
+    if (!fs.existsSync(SOUNDS_DIR)) {
+        fs.mkdirSync(SOUNDS_DIR, { recursive: true });
+        log(`📁 Created sounds directory: ${SOUNDS_DIR}`);
+        log(`💡 Add your sound files (.ogg, .mp3, .wav) to the sounds folder!`);
     }
+    
+    await registerCommands();
 });
 
 // Handle slash commands
@@ -256,99 +410,134 @@ client.on('interactionCreate', async interaction => {
 
     if (commandName === 'ping') {
         await interaction.reply({
-            content: '🏴‍☠️ Pong! Discord Soundboard Bot is working!',
-            flags: 64
+            content: '🏴‍☠️ Pong! Bot is working!',
+            ephemeral: true
         });
     }
 
     else if (commandName === 'soundboard') {
-        const soundId = interaction.options.getString('sound');
+        const soundFile = interaction.options.getString('sound');
         const repeatCount = interaction.options.getInteger('repeat') || 1;
         
-        if (soundId === 'none') {
+        if (soundFile === 'none') {
             return interaction.reply({
-                content: '❌ No Discord soundboard sounds found!\n\n**How to add sounds:**\n1. Go to Server Settings → Soundboard\n2. Upload your sound files\n3. Use `/refreshsounds` to update the bot',
-                flags: 64
+                content: '❌ No sound files found! Add .ogg, .mp3, or .wav files to the sounds folder and use `/refreshsounds`.',
+                ephemeral: true
             });
         }
         
-        await playDiscordSoundboard(interaction, soundId, repeatCount);
+        await playSoundboard(interaction, soundFile, repeatCount);
+    }
+    
+    else if (commandName === 'playsound') {
+        const filename = interaction.options.getString('filename');
+        const repeatCount = interaction.options.getInteger('repeat') || 1;
+        
+        // Check if file exists
+        const soundPath = path.join(SOUNDS_DIR, filename);
+        if (!fs.existsSync(soundPath)) {
+            return interaction.reply({
+                content: `❌ Sound file "${filename}" not found! Use \`/sounds\` to see available files.`,
+                ephemeral: true
+            });
+        }
+        
+        await playSoundboard(interaction, filename, repeatCount);
     }
     
     else if (commandName === 'refreshsounds') {
+        // Check if user has admin permissions
         if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator)) {
             return interaction.reply({
                 content: '❌ You need administrator permissions to refresh sounds!',
-                flags: 64
+                ephemeral: true
             });
         }
         
-        await interaction.deferReply({ flags: 64 });
+        await interaction.deferReply({ ephemeral: true });
         
         try {
-            await registerCommands(interaction.guild);
-            const sounds = await getGuildSoundboardSounds(interaction.guild);
+            await registerCommands();
+            const sounds = getAvailableSounds();
             await interaction.editReply({
-                content: `✅ Discord soundboard refreshed! Found ${sounds.length} sounds.\n\n**Note:** Restart Discord or wait a few minutes for new sounds to appear in the dropdown.`
+                content: `✅ Sound commands refreshed! Found ${sounds.length} sound files.\n\n**Note:** You may need to restart Discord or wait a few minutes for the new sounds to appear in the dropdown.`
             });
         } catch (error) {
             console.error('Error refreshing commands:', error);
             await interaction.editReply({
-                content: '❌ Failed to refresh soundboard. Check console for errors.'
+                content: '❌ Failed to refresh sound commands. Check console for errors.'
             });
         }
     }
     
-    else if (commandName === 'sounds') {
-        const sounds = await getGuildSoundboardSounds(interaction.guild);
+    else if (commandName === 'stopsound') {
+        const member = interaction.member;
+        const voiceChannel = member.voice.channel;
         
-        if (sounds.length === 0) {
+        if (!voiceChannel) {
             return interaction.reply({
-                content: '❌ No Discord soundboard sounds found!\n\n**How to add sounds:**\n1. Go to **Server Settings** → **Soundboard**\n2. Click **Upload Sound**\n3. Add your .mp3, .ogg, or .wav files\n4. Give them names and emojis\n5. Use `/refreshsounds` to update the bot\n\n🎵 **Benefits of Discord Soundboard:**\n• Can\'t be muted by users\n• Better performance\n• Native Discord integration',
-                flags: 64
+                content: '❌ You need to be in a voice channel!',
+                ephemeral: true
             });
         }
         
-        const soundList = sounds.map((sound, index) => {
-            const emoji = sound.emoji ? `${sound.emoji} ` : '';
-            return `${index + 1}. ${emoji}**${sound.name}**`;
-        }).join('\n');
+        stopSoundboardSession(voiceChannel.id);
+        
+        if (activeConnections.has(voiceChannel.id)) {
+            const connection = activeConnections.get(voiceChannel.id);
+            connection.destroy();
+            activeConnections.delete(voiceChannel.id);
+        }
+        
+        await interaction.reply({
+            content: '🛑 Stopped soundboard playback!',
+            ephemeral: true
+        });
+    }
+    
+    else if (commandName === 'sounds') {
+        const sounds = getAvailableSounds();
+        
+        if (sounds.length === 0) {
+            return interaction.reply({
+                content: '❌ No sound files found! Add .ogg, .mp3, or .wav files to the sounds folder.\n\n**Steps:**\n1. Add sound files to the `sounds` folder\n2. Use `/refreshsounds` (admin only)\n3. Restart the bot if needed',
+                ephemeral: true
+            });
+        }
+        
+        // Split into chunks if too many sounds
+        const soundList = sounds.map((sound, index) => `${index + 1}. **${sound.name}** \`(${sound.value})\``).join('\n');
         
         if (soundList.length > 2000) {
             // Split into multiple messages if too long
             const firstHalf = sounds.slice(0, Math.ceil(sounds.length / 2));
             const secondHalf = sounds.slice(Math.ceil(sounds.length / 2));
             
-            const firstList = firstHalf.map((sound, index) => {
-                const emoji = sound.emoji ? `${sound.emoji} ` : '';
-                return `${index + 1}. ${emoji}**${sound.name}**`;
-            }).join('\n');
+            const firstList = firstHalf.map((sound, index) => `${index + 1}. **${sound.name}** \`(${sound.value})\``).join('\n');
             
             await interaction.reply({
-                content: `🎵 **Discord Soundboard Sounds (${sounds.length}) - Part 1:**\n\n${firstList}`,
-                flags: 64
+                content: `🎵 **Available Sounds (${sounds.length}) - Part 1:**\n\n${firstList}`,
+                ephemeral: true
             });
             
-            const secondList = secondHalf.map((sound, index) => {
-                const emoji = sound.emoji ? `${sound.emoji} ` : '';
-                return `${firstHalf.length + index + 1}. ${emoji}**${sound.name}**`;
-            }).join('\n');
+            const secondList = secondHalf.map((sound, index) => `${firstHalf.length + index + 1}. **${sound.name}** \`(${sound.value})\``).join('\n');
             
             await interaction.followUp({
-                content: `🎵 **Discord Soundboard Sounds - Part 2:**\n\n${secondList}\n\n💡 **Tip:** These sounds can't be muted by users!`,
-                flags: 64
+                content: `🎵 **Available Sounds - Part 2:**\n\n${secondList}\n\n💡 **Tip:** Use \`/playsound filename:sound.ogg\` to play any sound by typing its filename!`,
+                ephemeral: true
             });
         } else {
             await interaction.reply({
-                content: `🎵 **Discord Soundboard Sounds (${sounds.length}):**\n\n${soundList}\n\n💡 **Tip:** These sounds can't be muted by users!`,
-                flags: 64
+                content: `🎵 **Available Sounds (${sounds.length}):**\n\n${soundList}\n\n💡 **Tip:** Use \`/playsound filename:sound.ogg\` to play any sound by typing its filename!`,
+                ephemeral: true
             });
         }
     }
 });
 
-// Voice state update handler for dynamic channels (unchanged)
+// Voice state update handler (unchanged for channel creation)
 client.on('voiceStateUpdate', async (oldState, newState) => {
+    const userId = newState.id;
     const member = newState.member;
 
     try {
@@ -390,14 +579,49 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
                 ]
             });
 
+            if (newChannel.parentId !== category.id) {
+                try {
+                    await newChannel.setParent(category.id);
+                    debugLog(`🔧 Manually moved ${crewName} to category ${category.name}`);
+                } catch (moveError) {
+                    console.error(`❌ Error moving channel to category:`, moveError);
+                }
+            }
+
             log(`🚢 Created new crew: ${crewName} for ${member.displayName}`);
 
             try {
                 if (member.voice.channelId) {
                     await member.voice.setChannel(newChannel);
+                    
+                    setTimeout(() => {
+                        playWelcomeSound(newChannel);
+                    }, 1000);
+                } else {
+                    debugLog(`User ${member.displayName} disconnected before move, cleaning up channel`);
+                    setTimeout(async () => {
+                        try {
+                            if (newChannel.members.size === 0) {
+                                await newChannel.delete();
+                                debugLog(`🗑️ Cleaned up unused crew: ${crewName}`);
+                            }
+                        } catch (cleanupError) {
+                            console.error(`❌ Error cleaning up channel:`, cleanupError);
+                        }
+                    }, 1000);
                 }
             } catch (moveError) {
                 console.error(`❌ Error moving user to new channel:`, moveError);
+                setTimeout(async () => {
+                    try {
+                        if (newChannel.members.size === 0) {
+                            await newChannel.delete();
+                            debugLog(`🗑️ Cleaned up failed crew: ${crewName}`);
+                        }
+                    } catch (cleanupError) {
+                        console.error(`❌ Error cleaning up channel:`, cleanupError);
+                    }
+                }, 1000);
             }
         }
 
@@ -408,6 +632,16 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
                 oldChannel.name !== CREATE_CHANNEL_NAME && 
                 oldChannel.parent?.name === CATEGORY_NAME &&
                 oldChannel.members.size === 0) {
+                
+                // Clean up any active voice connection
+                if (activeConnections.has(oldChannel.id)) {
+                    const connection = activeConnections.get(oldChannel.id);
+                    connection.destroy();
+                    activeConnections.delete(oldChannel.id);
+                }
+                
+                // Stop any soundboard session
+                stopSoundboardSession(oldChannel.id);
                 
                 setTimeout(async () => {
                     try {
@@ -428,6 +662,15 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
     }
 });
 
+// Legacy message handler for testing (optional)
+client.on('messageCreate', async (message) => {
+    if (message.author.bot) return;
+    
+    if (message.content === '!ping') {
+        message.reply('🏴‍☠️ Pong! Bot is working! Use `/ping` for slash command.');
+    }
+});
+
 // Error handling
 client.on('error', error => {
     console.error('❌ Discord client error:', error);
@@ -441,13 +684,29 @@ process.on('SIGINT', gracefulShutdown);
 process.on('SIGTERM', gracefulShutdown);
 
 function gracefulShutdown() {
-    log('🛑 Shutting down Discord Soundboard Bot...');
+    log('🛑 Shutting down bot...');
+    
+    // Clean up voice connections and soundboard sessions
+    activeConnections.forEach(connection => connection.destroy());
+    activeConnections.clear();
+    
+    soundboardSessions.forEach((session, channelId) => {
+        stopSoundboardSession(channelId);
+    });
+    
     client.destroy();
     process.exit(0);
 }
 
+// Keep the process alive
+setInterval(() => {
+    if (DEBUG) {
+        console.log(`🏴‍☠️ Bot alive - Connections: ${activeConnections.size}, Sessions: ${soundboardSessions.size}`);
+    }
+}, 300000); // Log every 5 minutes in debug mode
+
 // Start the bot
-log('🚀 Starting Discord Soundboard Bot...');
+log('🚀 Starting One Piece Soundboard Bot...');
 log(`🔑 Token: ${DISCORD_TOKEN ? 'Provided' : 'MISSING'}`);
 log(`🆔 Client ID: ${CLIENT_ID ? 'Provided' : 'MISSING'}`);
 
