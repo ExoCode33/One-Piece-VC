@@ -1,12 +1,10 @@
-const { Client, GatewayIntentBits, ChannelType, PermissionFlagsBits } = require('discord.js');
+const { Client, GatewayIntentBits, ChannelType, PermissionFlagsBits, SlashCommandBuilder, REST, Routes } = require('discord.js');
 const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, VoiceConnectionStatus } = require('@discordjs/voice');
 const fs = require('fs');
 const path = require('path');
 
-// Load environment variables only in development
-if (process.env.NODE_ENV !== 'production') {
-    require('dotenv').config();
-}
+// Load environment variables
+require('dotenv').config();
 
 // Configuration from environment variables
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
@@ -56,15 +54,18 @@ const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildVoiceStates,
-        GatewayIntentBits.GuildMessages
+        GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.MessageContent
     ]
 });
 
-// Track active voice connections for cleanup
+// Track active voice connections and soundboard sessions
 const activeConnections = new Map();
+const soundboardSessions = new Map(); // channelId -> { player, repeatCount, currentFile, timeoutId }
 
-// Sound file path
-const SOUND_FILE = path.join(__dirname, '..', 'sounds', 'The Going Merry One Piece - Cut.ogg');
+// Sounds directory
+const SOUNDS_DIR = path.join(__dirname, '..', 'sounds');
+const WELCOME_SOUND = path.join(SOUNDS_DIR, 'The Going Merry One Piece - Cut.ogg');
 
 // Helper functions
 function log(message) {
@@ -81,12 +82,160 @@ function getRandomCrewName() {
     return CREW_NAMES[Math.floor(Math.random() * CREW_NAMES.length)];
 }
 
-// Sound playing function
+// Get available sound files
+function getAvailableSounds() {
+    if (!fs.existsSync(SOUNDS_DIR)) {
+        fs.mkdirSync(SOUNDS_DIR, { recursive: true });
+        return [];
+    }
+    
+    return fs.readdirSync(SOUNDS_DIR)
+        .filter(file => file.endsWith('.ogg') || file.endsWith('.mp3') || file.endsWith('.wav'))
+        .map(file => {
+            const name = path.parse(file).name;
+            return {
+                name: name,
+                value: file,
+                description: `Play ${name}`
+            };
+        });
+}
+
+// Stop any existing soundboard session in a channel
+function stopSoundboardSession(channelId) {
+    const session = soundboardSessions.get(channelId);
+    if (session) {
+        if (session.player) {
+            session.player.stop();
+        }
+        if (session.timeoutId) {
+            clearTimeout(session.timeoutId);
+        }
+        soundboardSessions.delete(channelId);
+        debugLog(`🛑 Stopped soundboard session in channel ${channelId}`);
+    }
+}
+
+// Play soundboard with repetition
+async function playSoundboard(interaction, soundFile, repeatCount = 1) {
+    const member = interaction.member;
+    const voiceChannel = member.voice.channel;
+    
+    if (!voiceChannel) {
+        return interaction.reply({
+            content: '❌ You need to be in a voice channel to use the soundboard!',
+            ephemeral: true
+        });
+    }
+
+    const soundPath = path.join(SOUNDS_DIR, soundFile);
+    if (!fs.existsSync(soundPath)) {
+        return interaction.reply({
+            content: '❌ Sound file not found!',
+            ephemeral: true
+        });
+    }
+
+    try {
+        // Stop any existing session in this channel
+        stopSoundboardSession(voiceChannel.id);
+
+        await interaction.deferReply();
+
+        const connection = joinVoiceChannel({
+            channelId: voiceChannel.id,
+            guildId: voiceChannel.guild.id,
+            adapterCreator: voiceChannel.guild.voiceAdapterCreator,
+        });
+
+        activeConnections.set(voiceChannel.id, connection);
+
+        const player = createAudioPlayer();
+        let currentRepeat = 0;
+
+        // Store session info
+        soundboardSessions.set(voiceChannel.id, {
+            player: player,
+            repeatCount: repeatCount,
+            currentFile: soundFile,
+            timeoutId: null
+        });
+
+        function playSound() {
+            if (currentRepeat >= repeatCount) {
+                // Finished all repetitions
+                setTimeout(() => {
+                    if (activeConnections.has(voiceChannel.id)) {
+                        connection.destroy();
+                        activeConnections.delete(voiceChannel.id);
+                    }
+                    stopSoundboardSession(voiceChannel.id);
+                }, 2000);
+                return;
+            }
+
+            const resource = createAudioResource(soundPath, { 
+                inlineVolume: true 
+            });
+            resource.volume.setVolume(AUDIO_VOLUME);
+
+            player.play(resource);
+            currentRepeat++;
+            
+            debugLog(`🎵 Playing ${soundFile} (${currentRepeat}/${repeatCount})`);
+        }
+
+        player.on(AudioPlayerStatus.Idle, () => {
+            // When current playback ends, wait a moment then play again if needed
+            const session = soundboardSessions.get(voiceChannel.id);
+            if (session && currentRepeat < repeatCount) {
+                session.timeoutId = setTimeout(() => {
+                    playSound();
+                }, 1000); // 1 second gap between repetitions
+            }
+        });
+
+        player.on('error', error => {
+            console.error(`❌ Audio player error:`, error);
+            stopSoundboardSession(voiceChannel.id);
+            if (activeConnections.has(voiceChannel.id)) {
+                connection.destroy();
+                activeConnections.delete(voiceChannel.id);
+            }
+        });
+
+        connection.subscribe(player);
+
+        connection.on(VoiceConnectionStatus.Ready, () => {
+            playSound(); // Start playing
+        });
+
+        connection.on(VoiceConnectionStatus.Disconnected, () => {
+            debugLog(`🔌 Disconnected from ${voiceChannel.name}`);
+            activeConnections.delete(voiceChannel.id);
+            stopSoundboardSession(voiceChannel.id);
+        });
+
+        const soundName = path.parse(soundFile).name;
+        const repeatText = repeatCount > 1 ? ` (${repeatCount} times)` : '';
+        
+        await interaction.editReply({
+            content: `🎵 Now playing **${soundName}**${repeatText} in ${voiceChannel.name}!`
+        });
+
+    } catch (error) {
+        console.error(`❌ Error playing soundboard:`, error);
+        await interaction.editReply({
+            content: '❌ Failed to play sound. Make sure I have permission to join your voice channel!'
+        });
+    }
+}
+
+// Welcome sound function (unchanged)
 async function playWelcomeSound(channel) {
     try {
-        // Check if sound file exists
-        if (!fs.existsSync(SOUND_FILE)) {
-            debugLog(`Sound file not found: ${SOUND_FILE}`);
+        if (!fs.existsSync(WELCOME_SOUND)) {
+            debugLog(`Welcome sound file not found: ${WELCOME_SOUND}`);
             return;
         }
 
@@ -101,7 +250,7 @@ async function playWelcomeSound(channel) {
         activeConnections.set(channel.id, connection);
 
         const player = createAudioPlayer();
-        const resource = createAudioResource(SOUND_FILE, { 
+        const resource = createAudioResource(WELCOME_SOUND, { 
             inlineVolume: true 
         });
         
@@ -110,14 +259,7 @@ async function playWelcomeSound(channel) {
         player.play(resource);
         connection.subscribe(player);
 
-        // Handle player events
-        player.on(AudioPlayerStatus.Playing, () => {
-            debugLog(`🎵 Now playing welcome sound in ${channel.name}`);
-        });
-
         player.on(AudioPlayerStatus.Idle, () => {
-            debugLog(`🎵 Finished playing welcome sound in ${channel.name}`);
-            // Disconnect after playing
             setTimeout(() => {
                 if (activeConnections.has(channel.id)) {
                     connection.destroy();
@@ -135,7 +277,6 @@ async function playWelcomeSound(channel) {
         });
 
         connection.on(VoiceConnectionStatus.Disconnected, () => {
-            debugLog(`🔌 Disconnected from ${channel.name}`);
             activeConnections.delete(channel.id);
         });
 
@@ -144,13 +285,143 @@ async function playWelcomeSound(channel) {
     }
 }
 
+// Register slash commands
+async function registerCommands() {
+    const commands = [
+        new SlashCommandBuilder()
+            .setName('soundboard')
+            .setDescription('Play sounds from the soundboard')
+            .addStringOption(option => {
+                const sounds = getAvailableSounds();
+                option
+                    .setName('sound')
+                    .setDescription('Choose a sound to play')
+                    .setRequired(true);
+                
+                // Add sound choices (Discord limits to 25 choices)
+                sounds.slice(0, 25).forEach(sound => {
+                    option.addChoices({ name: sound.name, value: sound.value });
+                });
+                
+                return option;
+            })
+            .addIntegerOption(option =>
+                option
+                    .setName('repeat')
+                    .setDescription('How many times to repeat the sound (1-10)')
+                    .setMinValue(1)
+                    .setMaxValue(10)
+                    .setRequired(false)
+            ),
+        
+        new SlashCommandBuilder()
+            .setName('stopsound')
+            .setDescription('Stop the current soundboard playback'),
+            
+        new SlashCommandBuilder()
+            .setName('sounds')
+            .setDescription('List all available sounds'),
+            
+        new SlashCommandBuilder()
+            .setName('ping')
+            .setDescription('Check if the bot is responsive'),
+    ];
+
+    const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
+
+    try {
+        log('🔄 Refreshing slash commands...');
+        await rest.put(
+            Routes.applicationCommands(CLIENT_ID),
+            { body: commands }
+        );
+        log('✅ Slash commands registered successfully!');
+    } catch (error) {
+        console.error('❌ Error registering commands:', error);
+    }
+}
+
 // Bot event handlers
-client.once('ready', () => {
+client.once('ready', async () => {
     log(`One Piece Voice Bot is ready to set sail!`);
     log(`⚓ Logged in as ${client.user.tag}`);
-    log(`🏴‍☠️ AFK Management: DISABLED (use AFKManager.js if needed)`);
+    log(`🎵 Soundboard enabled with ${getAvailableSounds().length} sounds`);
+    
+    // Create sounds directory if it doesn't exist
+    if (!fs.existsSync(SOUNDS_DIR)) {
+        fs.mkdirSync(SOUNDS_DIR, { recursive: true });
+        log(`📁 Created sounds directory: ${SOUNDS_DIR}`);
+        log(`💡 Add your sound files (.ogg, .mp3, .wav) to the sounds folder!`);
+    }
+    
+    await registerCommands();
 });
 
+// Handle slash commands
+client.on('interactionCreate', async interaction => {
+    if (!interaction.isChatInputCommand()) return;
+
+    const { commandName } = interaction;
+
+    if (commandName === 'ping') {
+        await interaction.reply({
+            content: '🏴‍☠️ Pong! Bot is working!',
+            ephemeral: true
+        });
+    }
+
+    else if (commandName === 'soundboard') {
+        const soundFile = interaction.options.getString('sound');
+        const repeatCount = interaction.options.getInteger('repeat') || 1;
+        
+        await playSoundboard(interaction, soundFile, repeatCount);
+    }
+    
+    else if (commandName === 'stopsound') {
+        const member = interaction.member;
+        const voiceChannel = member.voice.channel;
+        
+        if (!voiceChannel) {
+            return interaction.reply({
+                content: '❌ You need to be in a voice channel!',
+                ephemeral: true
+            });
+        }
+        
+        stopSoundboardSession(voiceChannel.id);
+        
+        if (activeConnections.has(voiceChannel.id)) {
+            const connection = activeConnections.get(voiceChannel.id);
+            connection.destroy();
+            activeConnections.delete(voiceChannel.id);
+        }
+        
+        await interaction.reply({
+            content: '🛑 Stopped soundboard playback!',
+            ephemeral: true
+        });
+    }
+    
+    else if (commandName === 'sounds') {
+        const sounds = getAvailableSounds();
+        
+        if (sounds.length === 0) {
+            return interaction.reply({
+                content: '❌ No sound files found! Add .ogg, .mp3, or .wav files to the sounds folder.',
+                ephemeral: true
+            });
+        }
+        
+        const soundList = sounds.map((sound, index) => `${index + 1}. **${sound.name}**`).join('\n');
+        
+        await interaction.reply({
+            content: `🎵 **Available Sounds (${sounds.length}):**\n\n${soundList}`,
+            ephemeral: true
+        });
+    }
+});
+
+// Voice state update handler (unchanged for channel creation)
 client.on('voiceStateUpdate', async (oldState, newState) => {
     const userId = newState.id;
     const member = newState.member;
@@ -160,13 +431,11 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
         if (newState.channelId && newState.channel?.name === CREATE_CHANNEL_NAME) {
             const guild = newState.guild;
             
-            // Additional check to make sure user is still connected
             if (!member.voice.channelId) {
                 debugLog(`User ${member.displayName} no longer in voice, skipping channel creation`);
                 return;
             }
             
-            // Find or create category - look for exact match first
             let category = guild.channels.cache.find(c => 
                 c.name === CATEGORY_NAME && c.type === ChannelType.GuildCategory
             );
@@ -178,11 +447,8 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
                     type: ChannelType.GuildCategory,
                 });
                 log(`📁 Created category: ${CATEGORY_NAME}`);
-            } else {
-                debugLog(`Found existing category: ${category.name} (ID: ${category.id})`);
             }
 
-            // Create new crew channel
             const crewName = getRandomCrewName();
             const newChannel = await guild.channels.create({
                 name: crewName,
@@ -194,14 +460,11 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
                         allow: [
                             PermissionFlagsBits.ManageChannels,
                             PermissionFlagsBits.MoveMembers
-                            // REMOVED: PermissionFlagsBits.MuteMembers,
-                            // REMOVED: PermissionFlagsBits.DeafenMembers
                         ]
                     }
                 ]
             });
 
-            // Force move to category if it didn't work
             if (newChannel.parentId !== category.id) {
                 try {
                     await newChannel.setParent(category.id);
@@ -211,20 +474,16 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
                 }
             }
 
-            log(`🚢 Created new crew: ${crewName} for ${member.displayName} in category ${category.name}`);
+            log(`🚢 Created new crew: ${crewName} for ${member.displayName}`);
 
-            // Move user to new channel with error handling
             try {
-                // Check if user is still connected to voice
                 if (member.voice.channelId) {
                     await member.voice.setChannel(newChannel);
                     
-                    // Play welcome sound after successful move
                     setTimeout(() => {
                         playWelcomeSound(newChannel);
-                    }, 1000); // Small delay to ensure user is properly connected
+                    }, 1000);
                 } else {
-                    // User disconnected before we could move them, clean up the channel
                     debugLog(`User ${member.displayName} disconnected before move, cleaning up channel`);
                     setTimeout(async () => {
                         try {
@@ -239,7 +498,6 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
                 }
             } catch (moveError) {
                 console.error(`❌ Error moving user to new channel:`, moveError);
-                // Clean up the channel if move failed
                 setTimeout(async () => {
                     try {
                         if (newChannel.members.size === 0) {
@@ -268,9 +526,11 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
                     activeConnections.delete(oldChannel.id);
                 }
                 
+                // Stop any soundboard session
+                stopSoundboardSession(oldChannel.id);
+                
                 setTimeout(async () => {
                     try {
-                        // Double-check it's still empty
                         const channelToDelete = oldChannel.guild.channels.cache.get(oldChannel.id);
                         if (channelToDelete && channelToDelete.members.size === 0) {
                             await channelToDelete.delete();
@@ -288,27 +548,54 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
     }
 });
 
+// Legacy message handler for testing (optional)
+client.on('messageCreate', async (message) => {
+    if (message.author.bot) return;
+    
+    if (message.content === '!ping') {
+        message.reply('🏴‍☠️ Pong! Bot is working! Use `/ping` for slash command.');
+    }
+});
+
 // Error handling
 client.on('error', error => {
     console.error('❌ Discord client error:', error);
 });
 
-process.on('unhandledRejission', error => {
+process.on('unhandledRejection', error => {
     console.error('❌ Unhandled promise rejection:', error);
 });
 
-process.on('SIGINT', () => {
+process.on('SIGINT', gracefulShutdown);
+process.on('SIGTERM', gracefulShutdown);
+
+function gracefulShutdown() {
     log('🛑 Shutting down bot...');
     
-    // Clean up voice connections
+    // Clean up voice connections and soundboard sessions
     activeConnections.forEach(connection => connection.destroy());
     activeConnections.clear();
     
+    soundboardSessions.forEach((session, channelId) => {
+        stopSoundboardSession(channelId);
+    });
+    
     client.destroy();
     process.exit(0);
-});
+}
+
+// Keep the process alive
+setInterval(() => {
+    if (DEBUG) {
+        console.log(`🏴‍☠️ Bot alive - Connections: ${activeConnections.size}, Sessions: ${soundboardSessions.size}`);
+    }
+}, 300000); // Log every 5 minutes in debug mode
 
 // Start the bot
+log('🚀 Starting One Piece Soundboard Bot...');
+log(`🔑 Token: ${DISCORD_TOKEN ? 'Provided' : 'MISSING'}`);
+log(`🆔 Client ID: ${CLIENT_ID ? 'Provided' : 'MISSING'}`);
+
 client.login(DISCORD_TOKEN).catch(error => {
     console.error('❌ Failed to login:', error);
     process.exit(1);
