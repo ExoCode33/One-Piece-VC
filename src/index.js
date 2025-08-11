@@ -124,7 +124,7 @@ async function playSoundboard(interaction, soundFile, repeatCount = 1) {
     if (!voiceChannel) {
         return interaction.reply({
             content: '❌ You need to be in a voice channel to use the soundboard!',
-            ephemeral: true
+            flags: 64 // EPHEMERAL flag
         });
     }
 
@@ -132,7 +132,7 @@ async function playSoundboard(interaction, soundFile, repeatCount = 1) {
     if (!fs.existsSync(soundPath)) {
         return interaction.reply({
             content: '❌ Sound file not found!',
-            ephemeral: true
+            flags: 64 // EPHEMERAL flag
         });
     }
 
@@ -163,14 +163,8 @@ async function playSoundboard(interaction, soundFile, repeatCount = 1) {
 
         function playSound() {
             if (currentRepeat >= repeatCount) {
-                // Finished all repetitions
-                setTimeout(() => {
-                    if (activeConnections.has(voiceChannel.id)) {
-                        connection.destroy();
-                        activeConnections.delete(voiceChannel.id);
-                    }
-                    stopSoundboardSession(voiceChannel.id);
-                }, 2000);
+                // Finished all repetitions - this should not happen here anymore
+                debugLog(`🎵 All repetitions complete, cleanup will happen in Idle event`);
                 return;
             }
 
@@ -192,6 +186,18 @@ async function playSoundboard(interaction, soundFile, repeatCount = 1) {
                 session.timeoutId = setTimeout(() => {
                     playSound();
                 }, 1000); // 1 second gap between repetitions
+            } else {
+                // All repetitions complete, disconnect after a short delay
+                debugLog(`🎵 Audio finished, disconnecting in 2 seconds...`);
+                setTimeout(() => {
+                    if (activeConnections.has(voiceChannel.id)) {
+                        debugLog(`🔌 Disconnecting bot from ${voiceChannel.name}`);
+                        const conn = activeConnections.get(voiceChannel.id);
+                        conn.destroy();
+                        activeConnections.delete(voiceChannel.id);
+                    }
+                    stopSoundboardSession(voiceChannel.id);
+                }, 2000);
             }
         });
 
@@ -411,7 +417,7 @@ client.on('interactionCreate', async interaction => {
     if (commandName === 'ping') {
         await interaction.reply({
             content: '🏴‍☠️ Pong! Bot is working!',
-            ephemeral: true
+            flags: 64 // EPHEMERAL flag
         });
     }
 
@@ -422,7 +428,7 @@ client.on('interactionCreate', async interaction => {
         if (soundFile === 'none') {
             return interaction.reply({
                 content: '❌ No sound files found! Add .ogg, .mp3, or .wav files to the sounds folder and use `/refreshsounds`.',
-                ephemeral: true
+                flags: 64 // EPHEMERAL flag
             });
         }
         
@@ -438,7 +444,7 @@ client.on('interactionCreate', async interaction => {
         if (!fs.existsSync(soundPath)) {
             return interaction.reply({
                 content: `❌ Sound file "${filename}" not found! Use \`/sounds\` to see available files.`,
-                ephemeral: true
+                flags: 64 // EPHEMERAL flag
             });
         }
         
@@ -450,11 +456,11 @@ client.on('interactionCreate', async interaction => {
         if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator)) {
             return interaction.reply({
                 content: '❌ You need administrator permissions to refresh sounds!',
-                ephemeral: true
+                flags: 64 // EPHEMERAL flag
             });
         }
         
-        await interaction.deferReply({ ephemeral: true });
+        await interaction.deferReply({ flags: 64 }); // EPHEMERAL flag
         
         try {
             await registerCommands();
@@ -477,7 +483,7 @@ client.on('interactionCreate', async interaction => {
         if (!voiceChannel) {
             return interaction.reply({
                 content: '❌ You need to be in a voice channel!',
-                ephemeral: true
+                flags: 64 // EPHEMERAL flag
             });
         }
         
@@ -487,11 +493,12 @@ client.on('interactionCreate', async interaction => {
             const connection = activeConnections.get(voiceChannel.id);
             connection.destroy();
             activeConnections.delete(voiceChannel.id);
+            debugLog(`🔌 Force disconnected bot from voice channel`);
         }
         
         await interaction.reply({
             content: '🛑 Stopped soundboard playback!',
-            ephemeral: true
+            flags: 64 // EPHEMERAL flag
         });
     }
     
@@ -501,7 +508,7 @@ client.on('interactionCreate', async interaction => {
         if (sounds.length === 0) {
             return interaction.reply({
                 content: '❌ No sound files found! Add .ogg, .mp3, or .wav files to the sounds folder.\n\n**Steps:**\n1. Add sound files to the `sounds` folder\n2. Use `/refreshsounds` (admin only)\n3. Restart the bot if needed',
-                ephemeral: true
+                flags: 64 // EPHEMERAL flag
             });
         }
         
@@ -517,19 +524,19 @@ client.on('interactionCreate', async interaction => {
             
             await interaction.reply({
                 content: `🎵 **Available Sounds (${sounds.length}) - Part 1:**\n\n${firstList}`,
-                ephemeral: true
+                flags: 64 // EPHEMERAL flag
             });
             
             const secondList = secondHalf.map((sound, index) => `${firstHalf.length + index + 1}. **${sound.name}** \`(${sound.value})\``).join('\n');
             
             await interaction.followUp({
                 content: `🎵 **Available Sounds - Part 2:**\n\n${secondList}\n\n💡 **Tip:** Use \`/playsound filename:sound.ogg\` to play any sound by typing its filename!`,
-                ephemeral: true
+                flags: 64 // EPHEMERAL flag
             });
         } else {
             await interaction.reply({
                 content: `🎵 **Available Sounds (${sounds.length}):**\n\n${soundList}\n\n💡 **Tip:** Use \`/playsound filename:sound.ogg\` to play any sound by typing its filename!`,
-                ephemeral: true
+                flags: 64 // EPHEMERAL flag
             });
         }
     }
