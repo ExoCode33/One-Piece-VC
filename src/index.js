@@ -1,4 +1,6 @@
-const { Client, GatewayIntentBits, ChannelType, PermissionFlagsBits, SlashCommandBuilder, REST, Routes } = require('discord.js');
+// Configuration from environment variables
+const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
+const CLIENT_ID = process.env.CLIENT_ID;const { Client, GatewayIntentBits, ChannelType, PermissionFlagsBits, SlashCommandBuilder, REST, Routes } = require('discord.js');
 const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, VoiceConnectionStatus, createAudioReceiver } = require('@discordjs/voice');
 const fs = require('fs');
 const path = require('path');
@@ -6,9 +8,13 @@ const path = require('path');
 // Load environment variables
 require('dotenv').config();
 
-// Configuration from environment variables
-const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
-const CLIENT_ID = process.env.CLIENT_ID;
+// Configuration
+const VOICE_DETECTION_CONFIG = {
+    START_DELAY: 500,        // Wait 500ms before starting sound (reduces false triggers)
+    STOP_DELAY: 1000,        // Wait 1000ms after speaking stops before stopping sound
+    SOUND_REPEAT_DELAY: 200, // 200ms between sound repeats (was 100ms)
+    MIN_SPEAKING_DURATION: 300 // Minimum speaking duration to trigger (300ms)
+};
 const CREATE_CHANNEL_NAME = process.env.CREATE_CHANNEL_NAME || '🏴 Set Sail Together';
 const CATEGORY_NAME = process.env.CATEGORY_NAME || '🌊 Grand Line Voice Channels';
 const DELETE_DELAY = parseInt(process.env.DELETE_DELAY) || 5000;
@@ -62,7 +68,7 @@ const client = new Client({
 // Track active voice connections and soundboard sessions
 const activeConnections = new Map();
 const soundboardSessions = new Map();
-const voiceDetectionSessions = new Map(); // channelId -> { enabled, selectedSound, connection, receiver, targetUserId, isTargetSpeaking, soundLoop }
+const voiceDetectionSessions = new Map(); // channelId -> { enabled, selectedSound, connection, receiver, targetUserId, isTargetSpeaking, soundLoop, startDelay, stopDelay }
 
 // Sounds directory
 const SOUNDS_DIR = path.join(__dirname, '..', 'sounds');
@@ -125,6 +131,12 @@ function stopVoiceDetection(channelId) {
         if (session.soundLoop) {
             clearInterval(session.soundLoop);
         }
+        if (session.startDelay) {
+            clearTimeout(session.startDelay);
+        }
+        if (session.stopDelay) {
+            clearTimeout(session.stopDelay);
+        }
         if (session.connection) {
             session.connection.destroy();
         }
@@ -160,11 +172,11 @@ async function startSoundLoop(channelId, soundFile) {
         debugLog(`🔊 Playing detection sound: ${soundFile} (looping for target user)`);
 
         player.on(AudioPlayerStatus.Idle, () => {
-            // If user is still speaking, play again
+            // If user is still speaking, play again with less frequent repeats
             if (session && session.enabled && session.isTargetSpeaking) {
                 setTimeout(() => {
                     startSoundLoop(channelId, soundFile);
-                }, 100); // Very short delay before repeating
+                }, VOICE_DETECTION_CONFIG.SOUND_REPEAT_DELAY); // Longer delay between repeats
             }
         });
 
@@ -177,20 +189,48 @@ async function startSoundLoop(channelId, soundFile) {
     }
 }
 
-// Handle voice activity for target user
+// Handle voice activity for target user with sensitivity controls
 function handleVoiceActivity(channelId, userId, isSpeaking) {
     const session = voiceDetectionSessions.get(channelId);
     if (!session || !session.enabled || userId !== session.targetUserId) return;
     
     if (isSpeaking && !session.isTargetSpeaking) {
-        // Target user started speaking
+        // Target user started speaking - add delay before starting sound
+        debugLog(`🎯 Target user ${userId} started speaking - waiting ${VOICE_DETECTION_CONFIG.START_DELAY}ms before starting sound`);
+        
+        // Clear any existing stop delay
+        if (session.stopDelay) {
+            clearTimeout(session.stopDelay);
+            session.stopDelay = null;
+        }
+        
+        // Set start delay to reduce false triggers
+        session.startDelay = setTimeout(() => {
+            if (session && session.enabled && session.isTargetSpeaking) {
+                debugLog(`🎯 Starting sound loop after delay`);
+                startSoundLoop(channelId, session.selectedSound);
+            }
+        }, VOICE_DETECTION_CONFIG.START_DELAY);
+        
         session.isTargetSpeaking = true;
-        debugLog(`🎯 Target user ${userId} started speaking - starting sound loop`);
-        startSoundLoop(channelId, session.selectedSound);
+        
     } else if (!isSpeaking && session.isTargetSpeaking) {
-        // Target user stopped speaking
-        session.isTargetSpeaking = false;
-        debugLog(`🎯 Target user ${userId} stopped speaking - sound will stop after current playback`);
+        // Target user stopped speaking - add delay before stopping sound
+        debugLog(`🎯 Target user ${userId} stopped speaking - waiting ${VOICE_DETECTION_CONFIG.STOP_DELAY}ms before stopping sound`);
+        
+        // Clear any existing start delay
+        if (session.startDelay) {
+            clearTimeout(session.startDelay);
+            session.startDelay = null;
+        }
+        
+        // Set stop delay to avoid stopping for brief pauses
+        session.stopDelay = setTimeout(() => {
+            if (session) {
+                session.isTargetSpeaking = false;
+                debugLog(`🎯 Sound will stop after current playback (delayed stop)`);
+            }
+        }, VOICE_DETECTION_CONFIG.STOP_DELAY);
     }
 }
 
@@ -239,7 +279,7 @@ async function startVoiceDetection(interaction, soundFile, targetUser) {
         // Create receiver to listen for voice activity
         const receiver = connection.receiver;
 
-        // Store voice detection session
+        // Store voice detection session with sensitivity controls
         voiceDetectionSessions.set(voiceChannel.id, {
             enabled: true,
             selectedSound: soundFile,
@@ -247,7 +287,9 @@ async function startVoiceDetection(interaction, soundFile, targetUser) {
             receiver: receiver,
             targetUserId: targetUser.id,
             isTargetSpeaking: false,
-            soundLoop: null
+            soundLoop: null,
+            startDelay: null,
+            stopDelay: null
         });
 
         connection.on(VoiceConnectionStatus.Ready, () => {
@@ -278,7 +320,7 @@ async function startVoiceDetection(interaction, soundFile, targetUser) {
         const soundName = path.parse(soundFile).name;
         
         await interaction.editReply({
-            content: `🎧 **Voice Detection Started!**\n\n🎯 **Target:** ${targetUser.displayName}\n🔊 **Sound:** **${soundName}**\n📍 **Channel:** ${voiceChannel.name}\n\n💡 The sound will play continuously while ${targetUser.displayName} is speaking!\n\nUse \`/stopsoundboard\` to stop voice detection.`
+            content: `🎧 **Voice Detection Started!** *(Less Sensitive Mode)*\n\n🎯 **Target:** ${targetUser.displayName}\n🔊 **Sound:** **${soundName}**\n📍 **Channel:** ${voiceChannel.name}\n\n⚙️ **Settings:**\n• ${VOICE_DETECTION_CONFIG.START_DELAY}ms delay before sound starts\n• ${VOICE_DETECTION_CONFIG.STOP_DELAY}ms delay before sound stops\n• ${VOICE_DETECTION_CONFIG.SOUND_REPEAT_DELAY}ms between sound repeats\n\n💡 Reduces false triggers from brief sounds or background noise!\n\nUse \`/stopsoundboard\` to stop voice detection.`
         });
 
     } catch (error) {
