@@ -1,5 +1,5 @@
 const { Client, GatewayIntentBits, ChannelType, PermissionFlagsBits } = require('discord.js');
-const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, VoiceConnectionStatus, createAudioReceiver } = require('@discordjs/voice');
+const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, VoiceConnectionStatus } = require('@discordjs/voice');
 const { Pool } = require('pg');
 const fs = require('fs');
 const path = require('path');
@@ -16,8 +16,7 @@ const CATEGORY_ID = process.env.CATEGORY_ID; // Direct category ID override
 const DELETE_DELAY = parseInt(process.env.DELETE_DELAY) || 1000;
 const DEBUG = process.env.DEBUG === 'true';
 
-// AFK Management Configuration
-const AFK_TIMEOUT = parseInt(process.env.AFK_TIMEOUT) || 900000; // 15 minutes default
+// Audio Configuration
 const AUDIO_VOLUME = parseFloat(process.env.AUDIO_VOLUME) || 0.4;
 
 // PostgreSQL connection with auto-database creation
@@ -119,34 +118,13 @@ const client = new Client({
     ]
 });
 
-// Track user voice sessions, AFK status, and speaking receivers
+// Track user voice sessions and audio connections
 const voiceSessions = new Map(); // userId -> { sessionId, joinTime, channelId, channelName }
-const afkUsers = new Map(); // userId -> { channelId, lastActivity, isAfk }
 const activeConnections = new Map(); // channelId -> voice connection
-const speakingReceivers = new Map(); // channelId -> audio receiver for speaking detection
 
 // Audio file paths
 const SOUNDS_DIR = path.join(__dirname, '..', 'sounds');
 const WELCOME_SOUND = path.join(SOUNDS_DIR, 'The Going Merry One Piece.ogg');
-
-// One Piece themed disconnect messages for AFK users
-const onePieceDisconnectMessages = [
-    "🌊 {user} got swept away by the Grand Line currents!",
-    "💤 {user} fell asleep like Zoro during navigation...",
-    "🏃 {user} ran away from the Marines!",
-    "🍖 {user} went hunting for Sea King meat!",
-    "⚓ {user} got lost like Zoro (auto-disconnected)",
-    "🌪️ {user} was caught in a sudden storm!",
-    "🏝️ {user} went exploring a mysterious island!",
-    "🎣 {user} went fishing with Usopp!",
-    "🍺 {user} passed out from too much sake!",
-    "📚 {user} fell asleep reading poneglyphs with Robin...",
-    "🎵 {user} drifted away listening to Brook's music!",
-    "⚡ {user} was struck by Enel's lightning!",
-    "🌸 {user} got distracted by cherry blossoms in Wano!",
-    "🐟 {user} went swimming with the Fish-Men!",
-    "🔥 {user} got too close to Ace's flames!"
-];
 
 // Helper functions
 function log(message) {
@@ -323,253 +301,6 @@ async function getUserVoiceStats(userId, guildId, days = 30) {
     }
 }
 
-// AFK Management Functions
-function isUserAFK(voiceState) {
-    // Don't use mute/deafen status for AFK detection
-    // AFK will be determined by voice activity/inactivity instead
-    return false; // Always return false, we'll track activity differently
-}
-
-function trackAFKUser(userId, channelId, isAfk = false) {
-    afkUsers.set(userId, {
-        channelId: channelId,
-        lastActivity: Date.now(), // Track last voice activity
-        isAfk: false // Start as active
-    });
-    
-    // Only set up speaking detection for non-trigger channels
-    const guild = client.guilds.cache.first();
-    if (guild) {
-        const channel = guild.channels.cache.get(channelId);
-        if (channel && channel.name !== CREATE_CHANNEL_NAME) {
-            // Set up speaking detection for this channel if not the trigger channel
-            setupSpeakingDetection(channelId);
-        }
-    }
-    
-    if (DEBUG) {
-        debugLog(`👁️ Now tracking voice activity for user ${userId} in channel ${channelId}`);
-    }
-}
-
-// Set up speaking detection for a voice channel
-async function setupSpeakingDetection(channelId) {
-    if (speakingReceivers.has(channelId)) {
-        debugLog(`🎧 Speaking detection already exists for channel ${channelId}`);
-        return; // Already set up
-    }
-    
-    try {
-        const guild = client.guilds.cache.first();
-        if (!guild) return;
-        
-        const channel = guild.channels.cache.get(channelId);
-        if (!channel || channel.type !== ChannelType.GuildVoice) return;
-        
-        // Don't set up speaking detection for the trigger channel
-        if (channel.name === CREATE_CHANNEL_NAME) {
-            debugLog(`🚫 Skipping speaking detection for trigger channel: ${channel.name}`);
-            return;
-        }
-        
-        // Check if channel has any users being tracked
-        const usersInChannel = Array.from(afkUsers.entries()).filter(([userId, data]) => data.channelId === channelId);
-        if (usersInChannel.length === 0) {
-            debugLog(`🤔 No tracked users in channel ${channelId}, skipping speaking detection`);
-            return;
-        }
-        
-        debugLog(`🎧 Setting up speaking detection for channel ${channel.name} (${usersInChannel.length} tracked users)`);
-        
-        // Create a voice connection for speaking detection
-        const connection = joinVoiceChannel({
-            channelId: channelId,
-            guildId: guild.id,
-            adapterCreator: guild.voiceAdapterCreator,
-            selfDeaf: true, // We only want to detect speaking, not hear audio
-            selfMute: true
-        });
-        
-        connection.on(VoiceConnectionStatus.Ready, () => {
-            const receiver = connection.receiver;
-            speakingReceivers.set(channelId, receiver);
-            
-            log(`🎧 Speaking detection ACTIVE in ${channel.name} - monitoring ${usersInChannel.length} users`);
-            
-            // Listen for speaking events
-            receiver.speaking.on('start', (userId) => {
-                updateUserActivity(userId);
-                debugLog(`🗣️ User ${userId} started speaking in ${channel.name} - activity updated`);
-            });
-            
-            receiver.speaking.on('end', (userId) => {
-                updateUserActivity(userId);
-                debugLog(`🤐 User ${userId} stopped speaking in ${channel.name} - activity updated`);
-            });
-        });
-        
-        connection.on(VoiceConnectionStatus.Disconnected, () => {
-            speakingReceivers.delete(channelId);
-            log(`🔌 Speaking detection disconnected from ${channel.name}`);
-        });
-        
-        connection.on('error', (error) => {
-            console.error(`❌ Speaking detection error for ${channel.name}:`, error);
-            speakingReceivers.delete(channelId);
-            activeConnections.delete(`speaking_${channelId}`);
-        });
-        
-        // Store connection for cleanup
-        activeConnections.set(`speaking_${channelId}`, connection);
-        
-    } catch (error) {
-        console.error(`❌ Error setting up speaking detection for channel ${channelId}:`, error);
-    }
-}
-
-// Check if a channel still needs speaking detection
-function shouldMaintainSpeakingDetection(channelId) {
-    const usersInChannel = Array.from(afkUsers.entries()).filter(([userId, data]) => data.channelId === channelId);
-    return usersInChannel.length > 0;
-}
-
-// Clean up speaking detection for channels with no tracked users
-function cleanupUnusedSpeakingDetection() {
-    for (const [channelId] of speakingReceivers.entries()) {
-        if (!shouldMaintainSpeakingDetection(channelId)) {
-            cleanupSpeakingDetection(channelId);
-            debugLog(`🧹 Cleaned up unused speaking detection for channel ${channelId}`);
-        }
-    }
-}
-
-// Clean up speaking detection for a channel
-function cleanupSpeakingDetection(channelId) {
-    if (speakingReceivers.has(channelId)) {
-        speakingReceivers.delete(channelId);
-    }
-    
-    const speakingConnectionKey = `speaking_${channelId}`;
-    if (activeConnections.has(speakingConnectionKey)) {
-        const connection = activeConnections.get(speakingConnectionKey);
-        connection.destroy();
-        activeConnections.delete(speakingConnectionKey);
-        debugLog(`🧹 Cleaned up speaking detection for channel ${channelId}`);
-    }
-}
-
-function updateUserActivity(userId) {
-    const userData = afkUsers.get(userId);
-    if (userData) {
-        userData.lastActivity = Date.now();
-        userData.isAfk = false;
-        
-        if (DEBUG) {
-            debugLog(`🎤 Voice activity detected for user ${userId} - activity timestamp updated`);
-        }
-    }
-}
-
-function updateAFKStatus(userId, channelId, isAfk) {
-    // This function is no longer needed since we're not using mute/deafen status
-    // But keeping it for compatibility
-}
-
-function stopTrackingAFK(userId) {
-    afkUsers.delete(userId);
-    if (DEBUG) {
-        debugLog(`👋 Stopped tracking AFK for user ${userId}`);
-    }
-}
-
-async function checkAFKUsers() {
-    const now = Date.now();
-    const usersToDisconnect = [];
-
-    for (const [userId, userData] of afkUsers.entries()) {
-        const inactiveTime = now - userData.lastActivity;
-        
-        if (DEBUG && inactiveTime > 600000) { // Log if user has been inactive for more than 10 minutes
-            debugLog(`😴 User ${userId} inactive for ${Math.floor(inactiveTime / 60000)} minutes`);
-        }
-        
-        // Check if user has been inactive for longer than AFK_TIMEOUT
-        if (inactiveTime >= AFK_TIMEOUT) {
-            try {
-                const guild = client.guilds.cache.first();
-                if (!guild) continue;
-                
-                const member = await guild.members.fetch(userId).catch(() => null);
-                const channel = guild.channels.cache.get(userData.channelId);
-                
-                if (member && member.voice.channel && channel) {
-                    // Double-check they're still in the same channel
-                    if (member.voice.channel.id !== userData.channelId) {
-                        // User moved channels, update their tracking
-                        trackAFKUser(userId, member.voice.channel.id);
-                        continue;
-                    }
-                    
-                    // All channels are now monitored equally
-                    usersToDisconnect.push({ member, channel, inactiveTime });
-                    log(`⚠️ User ${member.displayName} marked for AFK disconnect after ${Math.floor(inactiveTime / 60000)} minutes of inactivity`);
-                } else {
-                    // User is no longer in voice, remove from tracking
-                    stopTrackingAFK(userId);
-                }
-            } catch (error) {
-                console.error(`❌ Error checking AFK user ${userId}:`, error);
-                stopTrackingAFK(userId);
-            }
-        }
-    }
-
-    // Disconnect AFK users
-    for (const { member, channel, inactiveTime } of usersToDisconnect) {
-        await disconnectAFKUser(member, channel, inactiveTime);
-    }
-}
-
-async function disconnectAFKUser(member, channel, inactiveTime) {
-    try {
-        // Disconnect the user
-        await member.voice.disconnect('AFK timeout - no voice activity');
-        stopTrackingAFK(member.id);
-        
-        // Get random disconnect message
-        const randomMessage = onePieceDisconnectMessages[
-            Math.floor(Math.random() * onePieceDisconnectMessages.length)
-        ].replace('{user}', member.displayName);
-        
-        // Send notification to a general channel if available
-        const guild = member.guild;
-        const generalChannel = guild.channels.cache.find(ch => 
-            ch.type === 0 && (ch.name.includes('general') || ch.name.includes('chat'))
-        );
-        
-        if (generalChannel) {
-            const embed = {
-                color: 0xFF6B6B,
-                title: '⚓ Crew Member Lost at Sea!',
-                description: randomMessage,
-                fields: [
-                    { name: '🏴‍☠️ Former Location', value: channel.name, inline: true },
-                    { name: '😴 Inactive Duration', value: `${Math.floor(inactiveTime / 60000)} minutes`, inline: true }
-                ],
-                footer: { text: 'Return when you\'re ready to set sail again!' },
-                timestamp: new Date().toISOString()
-            };
-
-            await generalChannel.send({ embeds: [embed] });
-        }
-        
-        log(`🌊 Disconnected inactive user: ${member.displayName} from ${channel.name} (inactive for ${Math.floor(inactiveTime / 60000)} minutes)`);
-        
-    } catch (error) {
-        console.error(`❌ Error disconnecting inactive user ${member.displayName}:`, error);
-    }
-}
-
 // Function to play welcome sound in a voice channel
 async function playWelcomeSound(channel) {
     try {
@@ -581,24 +312,14 @@ async function playWelcomeSound(channel) {
 
         log(`🎵 Attempting to join ${channel.name} to play welcome sound...`);
 
-        // Check if we already have a speaking detection connection for this channel
-        const speakingConnectionKey = `speaking_${channel.id}`;
-        let connection;
-        
-        if (activeConnections.has(speakingConnectionKey)) {
-            // Use existing speaking detection connection
-            connection = activeConnections.get(speakingConnectionKey);
-            log(`🔄 Using existing speaking detection connection for ${channel.name}`);
-        } else {
-            // Create new connection for welcome sound
-            connection = joinVoiceChannel({
-                channelId: channel.id,
-                guildId: channel.guild.id,
-                adapterCreator: channel.guild.voiceAdapterCreator,
-            });
-            activeConnections.set(`welcome_${channel.id}`, connection);
-            log(`🔌 Voice connection created for welcome sound in ${channel.name}`);
-        }
+        const connection = joinVoiceChannel({
+            channelId: channel.id,
+            guildId: channel.guild.id,
+            adapterCreator: channel.guild.voiceAdapterCreator,
+        });
+
+        activeConnections.set(channel.id, connection);
+        log(`🔌 Voice connection created for ${channel.name}`);
 
         const playAudio = () => {
             try {
@@ -618,11 +339,8 @@ async function playWelcomeSound(channel) {
                         resource = createAudioResource(WELCOME_SOUND);
                     } catch (fallbackError) {
                         console.error(`❌ All audio resource creation methods failed:`, fallbackError);
-                        if (activeConnections.has(`welcome_${channel.id}`)) {
-                            const conn = activeConnections.get(`welcome_${channel.id}`);
-                            conn.destroy();
-                            activeConnections.delete(`welcome_${channel.id}`);
-                        }
+                        connection.destroy();
+                        activeConnections.delete(channel.id);
                         return;
                     }
                 }
@@ -642,82 +360,72 @@ async function playWelcomeSound(channel) {
 
                 player.on(AudioPlayerStatus.Idle, () => {
                     log(`🎵 Welcome sound finished in ${channel.name}`);
-                    // Only disconnect if this was a dedicated welcome connection
-                    if (activeConnections.has(`welcome_${channel.id}`)) {
-                        setTimeout(() => {
-                            const conn = activeConnections.get(`welcome_${channel.id}`);
-                            if (conn) {
-                                conn.destroy();
-                                activeConnections.delete(`welcome_${channel.id}`);
-                                log(`🔌 Disconnected welcome connection from ${channel.name}`);
-                            }
-                        }, 2000);
-                    }
+                    // Disconnect after sound finishes
+                    setTimeout(() => {
+                        if (activeConnections.has(channel.id)) {
+                            const conn = activeConnections.get(channel.id);
+                            conn.destroy();
+                            activeConnections.delete(channel.id);
+                            log(`🔌 Disconnected from ${channel.name} after welcome sound`);
+                        }
+                    }, 2000);
                 });
 
                 player.on('error', error => {
                     console.error(`❌ Audio player error in ${channel.name}:`, error);
-                    if (activeConnections.has(`welcome_${channel.id}`)) {
-                        const conn = activeConnections.get(`welcome_${channel.id}`);
+                    if (activeConnections.has(channel.id)) {
+                        const conn = activeConnections.get(channel.id);
                         conn.destroy();
-                        activeConnections.delete(`welcome_${channel.id}`);
+                        activeConnections.delete(channel.id);
                     }
                 });
                 
             } catch (audioError) {
                 console.error(`❌ Error creating audio player:`, audioError);
                 log(`💡 This might be due to missing FFmpeg. Audio features will be skipped.`);
-                if (activeConnections.has(`welcome_${channel.id}`)) {
-                    connection.destroy();
-                    activeConnections.delete(`welcome_${channel.id}`);
-                }
+                connection.destroy();
+                activeConnections.delete(channel.id);
             }
         };
 
-        if (connection.state.status === VoiceConnectionStatus.Ready) {
-            // Connection is ready, play audio immediately
+        connection.on(VoiceConnectionStatus.Ready, () => {
+            log(`✅ Voice connection ready in ${channel.name}, starting audio...`);
             playAudio();
-        } else {
-            // Wait for connection to be ready
-            connection.on(VoiceConnectionStatus.Ready, () => {
-                log(`✅ Welcome sound connection ready in ${channel.name}, starting audio...`);
-                playAudio();
-            });
-        }
+        });
 
         connection.on(VoiceConnectionStatus.Disconnected, () => {
-            log(`🔌 Welcome sound connection disconnected from ${channel.name}`);
-            activeConnections.delete(`welcome_${channel.id}`);
+            log(`🔌 Voice connection disconnected from ${channel.name}`);
+            activeConnections.delete(channel.id);
         });
 
         connection.on('error', error => {
-            console.error(`❌ Welcome sound connection error in ${channel.name}:`, error);
-            activeConnections.delete(`welcome_${channel.id}`);
+            console.error(`❌ Voice connection error in ${channel.name}:`, error);
+            activeConnections.delete(channel.id);
         });
 
         // Add timeout in case connection fails
         setTimeout(() => {
-            const welcomeKey = `welcome_${channel.id}`;
-            if (activeConnections.has(welcomeKey)) {
-                const conn = activeConnections.get(welcomeKey);
+            if (activeConnections.has(channel.id)) {
+                const conn = activeConnections.get(channel.id);
                 if (conn.state.status !== VoiceConnectionStatus.Ready) {
-                    log(`⚠️ Welcome sound connection timeout for ${channel.name}, destroying...`);
+                    log(`⚠️ Connection timeout for ${channel.name}, destroying...`);
                     conn.destroy();
-                    activeConnections.delete(welcomeKey);
+                    activeConnections.delete(channel.id);
                 }
             }
         }, 10000); // 10 second timeout
 
     } catch (error) {
         console.error(`❌ Error in playWelcomeSound for ${channel.name}:`, error);
-        const welcomeKey = `welcome_${channel.id}`;
-        if (activeConnections.has(welcomeKey)) {
-            const conn = activeConnections.get(welcomeKey);
+        if (activeConnections.has(channel.id)) {
+            const conn = activeConnections.get(channel.id);
             conn.destroy();
-            activeConnections.delete(welcomeKey);
+            activeConnections.delete(channel.id);
         }
     }
 }
+
+// Function to sync channel permissions with category
 async function syncChannelWithCategory(channel, category, creatorId) {
     try {
         // Get category permission overwrites
@@ -778,9 +486,6 @@ client.once('ready', async () => {
     log(`One Piece Dynamic Voice Bot is ready to set sail!`);
     log(`⚓ Logged in as ${client.user.tag}`);
     log(`🏴‍☠️ Serving ${client.guilds.cache.size} server(s)`);
-    log(`🛡️ AFK Protection: ${AFK_EXCLUDED_CHANNELS.join(', ')}`);
-    log(`⏰ AFK Timeout: ${AFK_TIMEOUT / 60000} minutes`);
-    log(`😴 AFK Detection: Voice inactivity (ignores mute/deafen status)`);
     log(`🔊 Audio Volume: ${Math.round(AUDIO_VOLUME * 100)}%`);
     
     // Check if welcome sound exists
@@ -829,16 +534,7 @@ client.once('ready', async () => {
         log(`⏰ Database time: ${result.rows[0].now}`);
         log('🗄️ Database connection test successful!');
         
-        // Start AFK monitoring
-        log('🏴‍☠️ AFK Manager: Started monitoring for inactive pirates...');
-        
-        // Check AFK users every minute
-        setInterval(checkAFKUsers, 60000);
-        
-        // Clean up unused speaking detection every 5 minutes
-        setInterval(cleanupUnusedSpeakingDetection, 300000);
-        
-        // Set up speaking detection for existing voice channel users
+        // Set up voice tracking for existing voice channel users
         log('🔍 Checking for existing voice channel users...');
         client.guilds.cache.forEach(guild => {
             guild.channels.cache
@@ -856,7 +552,6 @@ client.once('ready', async () => {
                             
                             // Start tracking existing users
                             startVoiceSession(userId, guildId, channelId, channel.name);
-                            trackAFKUser(userId, channelId);
                             
                             log(`🔄 Now tracking existing user: ${member.displayName} in ${channel.name}`);
                         }
@@ -882,42 +577,16 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
         if (oldState.channelId && !newState.channelId) {
             // User left voice completely
             await endVoiceSession(userId);
-            stopTrackingAFK(userId);
-            
-            // Clean up speaking detection if no one left in old channel
-            if (oldState.channel) {
-                setTimeout(() => {
-                    if (!shouldMaintainSpeakingDetection(oldState.channelId)) {
-                        cleanupSpeakingDetection(oldState.channelId);
-                    }
-                }, 5000); // Wait 5 seconds before cleanup
-            }
-            
             debugLog(`👤 ${member.displayName} left voice chat`);
         } else if (!oldState.channelId && newState.channelId) {
             // User joined voice
             await startVoiceSession(userId, guildId, newState.channelId, newState.channel.name);
-            trackAFKUser(userId, newState.channelId);
             debugLog(`👤 ${member.displayName} joined ${newState.channel.name}`);
         } else if (oldState.channelId && newState.channelId && oldState.channelId !== newState.channelId) {
             // User moved between channels
             await endVoiceSession(userId);
             await startVoiceSession(userId, guildId, newState.channelId, newState.channel.name);
-            trackAFKUser(userId, newState.channelId);
-            
-            // Clean up old channel if no one left
-            setTimeout(() => {
-                if (!shouldMaintainSpeakingDetection(oldState.channelId)) {
-                    cleanupSpeakingDetection(oldState.channelId);
-                }
-            }, 5000);
-            
             debugLog(`👤 ${member.displayName} moved from ${oldState.channel.name} to ${newState.channel.name}`);
-        } else if (newState.channelId && oldState.channelId === newState.channelId) {
-            // User's state changed (muted/deafened) while in same channel
-            // This is important - any state change means they're active!
-            updateUserActivity(userId);
-            debugLog(`🎛️ ${member.displayName} changed voice state - marked as active`);
         }
 
         // Dynamic Voice Channel Creation
@@ -1058,16 +727,12 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
                 debugLog(`🕐 Scheduling deletion of empty crew: ${oldChannel.name} in ${DELETE_DELAY}ms`);
                 
                 // Clean up any voice connections for this channel
-                const welcomeKey = `welcome_${oldChannel.id}`;
-                if (activeConnections.has(welcomeKey)) {
-                    const connection = activeConnections.get(welcomeKey);
+                if (activeConnections.has(oldChannel.id)) {
+                    const connection = activeConnections.get(oldChannel.id);
                     connection.destroy();
-                    activeConnections.delete(welcomeKey);
-                    debugLog(`🔌 Cleaned up welcome connection for ${oldChannel.name}`);
+                    activeConnections.delete(oldChannel.id);
+                    debugLog(`🔌 Cleaned up voice connection for ${oldChannel.name}`);
                 }
-                
-                // Clean up speaking detection
-                cleanupSpeakingDetection(oldChannel.id);
                 
                 setTimeout(async () => {
                     try {
@@ -1158,68 +823,13 @@ client.on('messageCreate', async (message) => {
         message.reply(`🏴‍☠️ **One Piece Voice Bot Info**
 ⚓ **Servers:** ${client.guilds.cache.size}
 👤 **Active Voice Sessions:** ${voiceSessions.size}
-😴 **AFK Users Tracked:** ${afkUsers.size}
 🎵 **Active Audio Connections:** ${activeConnections.size}
 ⏰ **Uptime:** ${hours}h ${minutes}m
 🗄️ **Database:** Connected
-🎤 **Features:** Dynamic Voice Channels, Voice Time Tracking, AFK Management, Welcome Sounds`);
+🎤 **Features:** Dynamic Voice Channels, Voice Time Tracking, Welcome Sounds`);
     }
     
-    // AFK stats command
-    if (message.content === '!afkstats') {
-        try {
-            const totalTracked = afkUsers.size;
-            const now = Date.now();
-            let currentlyInactive = 0;
-            
-            // Count users who have been inactive for more than 5 minutes
-            for (const [userId, userData] of afkUsers.entries()) {
-                const inactiveTime = now - userData.lastActivity;
-                if (inactiveTime >= 300000) { // 5 minutes
-                    currentlyInactive++;
-                }
-            }
-            
-            message.reply(`📊 **AFK System Stats**
-👁️ **Users Tracked:** ${totalTracked}
-😴 **Inactive (5+ min):** ${currentlyInactive}
-⏰ **Disconnect Timeout:** ${AFK_TIMEOUT / 60000} minutes
-🎤 **Detection Method:** Voice inactivity (all channels monitored)`);
-        } catch (error) {
-            console.error('❌ Error getting AFK stats:', error);
-            message.reply('❌ Error retrieving AFK stats.');
-        }
-    }
-    
-    // Emergency AFK disable (admin only)
-    if (message.content === '!disableafk' && message.member.permissions.has(PermissionFlagsBits.Administrator)) {
-        // Clear all AFK tracking
-        afkUsers.clear();
-        message.reply('🛑 **AFK system temporarily disabled!** All tracking cleared. Restart bot to re-enable.');
-    }
-    
-    // Force reset user's AFK timer
-    if (message.content === '!resetafk') {
-        updateUserActivity(message.author.id);
-        message.reply('✅ Your AFK timer has been reset!');
-    }
-    if (message.content === '!myafk') {
-        const userData = afkUsers.get(message.author.id);
-        if (userData) {
-            const now = Date.now();
-            const inactiveTime = now - userData.lastActivity;
-            const inactiveMinutes = Math.floor(inactiveTime / 60000);
-            const timeUntilKick = Math.max(0, Math.floor((AFK_TIMEOUT - inactiveTime) / 60000));
-            
-            message.reply(`📊 **Your AFK Status:**
-⏰ **Inactive for:** ${inactiveMinutes} minutes
-⏳ **Time until kick:** ${timeUntilKick} minutes
-📍 **Channel:** <#${userData.channelId}>
-💡 **Any voice action resets your timer!**`);
-        } else {
-            message.reply('❌ You\'re not in a voice channel or not being tracked.');
-        }
-    }
+    // Debug sound test command
     if (message.content === '!testsound') {
         if (!message.member.voice.channel) {
             return message.reply('❌ You need to be in a voice channel to test the sound!');
@@ -1243,28 +853,28 @@ client.on('messageCreate', async (message) => {
 💡 **Solution:** Create a 'sounds' folder and add 'The Going Merry One Piece.ogg'`);
         }
     }
+    
+    // Help command
     if (message.content === '!help') {
         message.reply(`🏴‍☠️ **One Piece Voice Bot Commands**
 
 **📊 Voice Tracking:**
 \`!voicestats\` or \`!stats\` - View your voice activity stats
-\`!afkstats\` - View AFK system statistics
 \`!ping\` - Check bot latency
 \`!botinfo\` - View bot information
 \`!help\` - Show this help message
+
+**🎵 Audio Testing:**
+\`!testsound\` - Test welcome sound in your current voice channel
+\`!checksound\` - Check if sound file exists and show details
 
 **🚢 How to Use:**
 1. Join "${CREATE_CHANNEL_NAME}" voice channel
 2. Bot will create a new crew with a One Piece themed name
 3. You become the captain with full channel permissions
-4. Empty crews are automatically deleted after ${DELETE_DELAY/1000} seconds
-5. Your voice time is automatically tracked!
-
-**😴 AFK Management:**
-• Users disconnected after ${AFK_TIMEOUT/60000} minutes of voice inactivity
-• Detects actual speaking activity, not just mute/deafen changes
-• All channels monitored equally (no protected channels)
-• Perfect for catching people who fall asleep in voice
+4. Bot plays welcome sound (if file exists)
+5. Empty crews are automatically deleted after ${DELETE_DELAY/1000} seconds
+6. Your voice time is automatically tracked!
 
 **🎯 Features:**
 • Dynamic voice channel creation
@@ -1272,7 +882,7 @@ client.on('messageCreate', async (message) => {
 • Voice time tracking with PostgreSQL
 • Captain permissions for channel creators
 • Automatic cleanup of empty channels
-• AFK user management with One Piece themes`);
+• Welcome sounds with The Going Merry theme`);
     }
 });
 
@@ -1319,14 +929,6 @@ async function gracefulShutdown() {
         });
         activeConnections.clear();
         
-        // Clear speaking receivers
-        log(`🎧 Cleaning up speaking detection...`);
-        speakingReceivers.clear();
-        
-        // Clear AFK tracking
-        log(`😴 Clearing ${afkUsers.size} AFK tracking sessions...`);
-        afkUsers.clear();
-        
         // Close database connection
         log('🗄️ Closing database connection...');
         if (pool) {
@@ -1347,7 +949,7 @@ async function gracefulShutdown() {
 // Keep the process alive and log status
 setInterval(() => {
     if (DEBUG) {
-        console.log(`🏴‍☠️ Bot Status - Guilds: ${client.guilds.cache.size}, Active Voice Sessions: ${voiceSessions.size}, AFK Tracked: ${afkUsers.size}, Audio Connections: ${activeConnections.size}, Speaking Receivers: ${speakingReceivers.size}, Uptime: ${Math.floor(process.uptime()/60)}m`);
+        console.log(`🏴‍☠️ Bot Status - Guilds: ${client.guilds.cache.size}, Active Voice Sessions: ${voiceSessions.size}, Audio Connections: ${activeConnections.size}, Uptime: ${Math.floor(process.uptime()/60)}m`);
     }
 }, 300000); // Log every 5 minutes in debug mode
 
