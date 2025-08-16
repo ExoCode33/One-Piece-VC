@@ -21,7 +21,7 @@ const DEBUG = process.env.DEBUG === 'true';
 // Audio Configuration
 const AUDIO_VOLUME = parseFloat(process.env.AUDIO_VOLUME) || 0.4;
 
-// PostgreSQL connection with auto-database creation
+// PostgreSQL connection with Railway support
 let pool;
 let voiceTimeTracker;
 
@@ -614,7 +614,288 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
                         } else {
                             debugLog(`👥 Crew ${oldChannel.name} no longer empty, keeping it`);
                         }
-                    } catch (error) {
+                        console.error('❌ Error getting voice stats:', error);
+            message.reply('❌ Error retrieving voice stats. Please try again later.');
+        }
+    }
+
+    // Test voice logging command
+    if (message.content === '!testlog') {
+        if (!message.member.permissions.has(PermissionFlagsBits.ManageChannels)) {
+            return message.reply('❌ You need Manage Channels permission to test logging!');
+        }
+
+        try {
+            // Test if the channel exists
+            const channelId = process.env.VOICE_LOG_CHANNEL_ID;
+            if (!channelId) {
+                return message.reply('❌ VOICE_LOG_CHANNEL_ID not set in environment variables!');
+            }
+
+            const testChannel = message.guild.channels.cache.get(channelId);
+            if (!testChannel) {
+                return message.reply(`❌ Channel with ID ${channelId} not found in this server!`);
+            }
+
+            // Test sending a message
+            await testChannel.send('🧪 **Test Message** - Voice logging should work if you can see this!');
+            
+            // Test sending an embed (like the voice logs)
+            const testEmbed = new EmbedBuilder()
+                .setColor('#00FF00')
+                .setTitle('🧪 Test Voice Log')
+                .setDescription(`<@${message.author.id}> joined <#${message.channel.id}>`)
+                .addFields(
+                    { name: '👤 User', value: message.author.displayName, inline: true },
+                    { name: '🏠 Channel', value: 'Test Channel', inline: true }
+                )
+                .setTimestamp()
+                .setFooter({ text: 'Voice Activity Logger - TEST' });
+
+            await testChannel.send({ embeds: [testEmbed] });
+            
+            message.reply(`✅ Test successful! Check ${testChannel} for test messages.`);
+        } catch (error) {
+            message.reply(`❌ Error testing channel: ${error.message}`);
+            console.error('Test log error:', error);
+        }
+    }
+
+    // Debug voice logging status
+    if (message.content === '!debuglog') {
+        if (!message.member.permissions.has(PermissionFlagsBits.ManageChannels)) {
+            return message.reply('❌ You need Manage Channels permission!');
+        }
+
+        const status = `🔍 **Voice Logging Debug Info:**
+**Enabled:** ${process.env.ENABLE_VOICE_LOGGING}
+**Channel ID:** ${process.env.VOICE_LOG_CHANNEL_ID || 'Not set'}
+**Channel Name Fallback:** ${process.env.VOICE_LOG_CHANNEL || 'voice-activity-log'}
+**Voice Tracker Active:** ${voiceTimeTracker ? 'Yes' : 'No'}
+**Active Sessions:** ${voiceTimeTracker ? voiceTimeTracker.getActiveSessionsCount() : 0}`;
+
+        message.reply(status);
+    }
+
+    // Force test voice event
+    if (message.content === '!forcelog') {
+        if (!message.member.permissions.has(PermissionFlagsBits.ManageChannels)) {
+            return message.reply('❌ You need Manage Channels permission!');
+        }
+
+        try {
+            // Manually trigger a voice log event
+            await voiceTimeTracker.channelLogger.logVoiceEvent(
+                message.guild.id,
+                message.author.id,
+                message.author.displayName,
+                message.channel.id,
+                message.channel.name,
+                'JOIN',
+                {}
+            );
+            message.reply('🧪 Forced voice log event sent!');
+        } catch (error) {
+            message.reply(`❌ Error: ${error.message}`);
+            console.error('Force log error:', error);
+        }
+    }
+
+    // Command to create voice log channel
+    if (message.content === '!createvoicelog') {
+        if (!message.member.permissions.has(PermissionFlagsBits.ManageChannels)) {
+            return message.reply('❌ You need Manage Channels permission to create the voice log channel!');
+        }
+
+        try {
+            const newChannel = await voiceTimeTracker.createLogChannel(message.guild);
+            if (newChannel) {
+                message.reply(`✅ Created voice log channel: ${newChannel}\n🔍 Voice activity will now be logged here!`);
+            } else {
+                message.reply('❌ Error creating voice log channel. Please check bot permissions.');
+            }
+        } catch (error) {
+            console.error('❌ Error creating voice log channel:', error);
+            message.reply('❌ Error creating voice log channel. Please check bot permissions.');
+        }
+    }
+    
+    // Ping command
+    if (message.content === '!ping') {
+        const ping = Date.now() - message.createdTimestamp;
+        message.reply(`🏴‍☠️ **Pong!** 
+📡 Bot Latency: \`${ping}ms\`
+💓 API Latency: \`${Math.round(client.ws.ping)}ms\`
+⚓ Ready to set sail!`);
+    }
+    
+    // Test sound command
+    if (message.content === '!testsound') {
+        if (!message.member.voice.channel) {
+            return message.reply('❌ You need to be in a voice channel to test the sound!');
+        }
+        
+        message.reply('🎵 Testing welcome sound...');
+        playWelcomeSound(message.member.voice.channel);
+    }
+    
+    // Check sound file command
+    if (message.content === '!checksound') {
+        if (fs.existsSync(WELCOME_SOUND)) {
+            const stats = fs.statSync(WELCOME_SOUND);
+            message.reply(`✅ **Sound file found!**
+📁 **Path:** \`${WELCOME_SOUND}\`
+📏 **Size:** ${(stats.size / 1024 / 1024).toFixed(2)} MB
+🔊 **Volume:** ${Math.round(AUDIO_VOLUME * 100)}%`);
+        } else {
+            message.reply(`❌ **Sound file NOT found!**
+📁 **Expected path:** \`${WELCOME_SOUND}\`
+💡 **Solution:** Create a 'sounds' folder and add 'The Going Merry One Piece.ogg'`);
+        }
+    }
+    
+    // Help command
+    if (message.content === '!help') {
+        message.reply(`🏴‍☠️ **One Piece Voice Bot Commands**
+
+**📊 Voice Tracking:**
+\`/check-voice-time [@user]\` - Check voice time for a user (NEW!)
+\`/voice-leaderboard [limit]\` - Show top voice users (NEW!)
+\`/bot-info\` - Show bot information (NEW!)
+\`!voicestats\` - Legacy voice stats command
+\`!ping\` - Check bot latency
+
+**🎵 Audio Testing:**
+\`!testsound\` - Test welcome sound in your current voice channel
+\`!checksound\` - Check if sound file exists and show details
+
+**🔧 Debug Commands:**
+\`!testlog\` - Test voice logging channel (Manage Channels required)
+\`!debuglog\` - Show voice logging debug info (Manage Channels required)
+\`!forcelog\` - Force send a test voice event (Manage Channels required)
+\`!createvoicelog\` - Create voice log channel (Manage Channels required)
+
+**🚢 How to Use:**
+1. Join "${CREATE_CHANNEL_NAME}" voice channel
+2. Bot will create a new crew with a One Piece themed name
+3. You become the captain with full channel permissions
+4. Bot plays welcome sound (if file exists)
+5. Empty crews are automatically deleted after ${DELETE_DELAY/1000} seconds
+6. Voice time is automatically tracked!
+
+**🎯 Features:**
+• Dynamic voice channel creation with One Piece themed names
+• **Simplified voice time tracking (total time only)**
+• **Real-time Discord channel logging of voice events**
+• Captain permissions for channel creators
+• Automatic cleanup of empty channels
+• Welcome sounds with The Going Merry theme
+• **Slash commands for better user experience**
+
+**💡 Use slash commands (/) for the best experience!**
+**🔍 Voice events are logged to your designated channel with rich embeds!**`);
+    }
+});
+
+// Error handling
+client.on('error', error => {
+    console.error('❌ Discord client error:', error);
+});
+
+client.on('warn', warning => {
+    console.warn('⚠️ Discord client warning:', warning);
+});
+
+process.on('unhandledRejection', error => {
+    console.error('❌ Unhandled promise rejection:', error);
+});
+
+process.on('uncaughtException', error => {
+    console.error('❌ Uncaught exception:', error);
+    process.exit(1);
+});
+
+process.on('SIGINT', gracefulShutdown);
+process.on('SIGTERM', gracefulShutdown);
+
+async function gracefulShutdown() {
+    log('🛑 Shutting down bot gracefully...');
+    
+    try {
+        // End all active voice sessions
+        if (voiceTimeTracker) {
+            await voiceTimeTracker.endAllSessions();
+        }
+        
+        // Clean up voice connections
+        log(`🔌 Cleaning up ${activeConnections.size} voice connections...`);
+        activeConnections.forEach((connection, key) => {
+            try {
+                connection.destroy();
+                debugLog(`🔌 Destroyed connection for ${key}`);
+            } catch (error) {
+                // Ignore errors during shutdown
+            }
+        });
+        activeConnections.clear();
+        
+        // Close database connection
+        log('🗄️ Closing database connection...');
+        if (pool) {
+            await pool.end();
+        }
+        
+        // Destroy Discord client
+        client.destroy();
+        
+        log('👋 Bot shutdown complete!');
+    } catch (error) {
+        console.error('❌ Error during shutdown:', error);
+    }
+    
+    process.exit(0);
+}
+
+// Keep the process alive and log status
+setInterval(() => {
+    if (DEBUG) {
+        const activeSessions = voiceTimeTracker ? voiceTimeTracker.getActiveSessionsCount() : 0;
+        console.log(`🏴‍☠️ Bot Status - Guilds: ${client.guilds.cache.size}, Active Voice Sessions: ${activeSessions}, Audio Connections: ${activeConnections.size}, Uptime: ${Math.floor(process.uptime()/60)}m`);
+    }
+}, 300000); // Log every 5 minutes in debug mode
+
+// Start the bot
+async function startBot() {
+    log('🚀 Starting One Piece Dynamic Voice Bot...');
+    log(`🔑 Discord Token: ${DISCORD_TOKEN ? '✅ Provided' : '❌ MISSING'}`);
+    log(`🆔 Client ID: ${CLIENT_ID ? '✅ Provided' : '❌ MISSING'}`);
+    log(`🗄️ Database URL: ${process.env.DATABASE_URL ? '✅ Provided' : '❌ MISSING'}`);
+
+    if (!DISCORD_TOKEN) {
+        console.error('❌ DISCORD_TOKEN is required! Please check your .env file.');
+        process.exit(1);
+    }
+
+    if (!CLIENT_ID) {
+        console.error('❌ CLIENT_ID is required for slash commands! Please check your .env file.');
+        process.exit(1);
+    }
+
+    if (!process.env.DATABASE_URL) {
+        console.error('❌ DATABASE_URL is required! Please check your .env file.');
+        process.exit(1);
+    }
+
+    try {
+        await client.login(DISCORD_TOKEN);
+    } catch (error) {
+        console.error('❌ Failed to login to Discord:', error);
+        process.exit(1);
+    }
+}
+
+// Start the bot
+startBot();
                         console.error(`❌ Error deleting channel ${oldChannel.name}:`, error);
                     }
                 }, DELETE_DELAY);
@@ -748,7 +1029,7 @@ client.on('interactionCreate', async (interaction) => {
     }
 });
 
-// Legacy message commands (keeping some for backwards compatibility)
+// Legacy message commands and testing commands
 client.on('messageCreate', async (message) => {
     if (message.author.bot) return;
     
@@ -763,249 +1044,3 @@ client.on('messageCreate', async (message) => {
                 message.reply('📊 No voice time recorded! Join some voice channels to start tracking! 🎤');
             }
         } catch (error) {
-            console.error('❌ Error getting voice stats:', error);
-            message.reply('❌ Error retrieving voice stats. Please try again later.');
-        }
-    }
-    
-    // Ping command
-    if (message.content === '!ping') {
-        const ping = Date.now() - message.createdTimestamp;
-        message.reply(`🏴‍☠️ **Pong!** 
-📡 Bot Latency: \`${ping}ms\`
-💓 API Latency: \`${Math.round(client.ws.ping)}ms\`
-⚓ Ready to set sail!`);
-    }
-    
-    // Test sound command
-    if (message.content === '!testsound') {
-        if (!message.member.voice.channel) {
-            return message.reply('❌ You need to be in a voice channel to test the sound!');
-        }
-        
-        message.reply('🎵 Testing welcome sound...');
-        playWelcomeSound(message.member.voice.channel);
-    }
-    
-    // Check sound file command
-    if (message.content === '!checksound') {
-        if (fs.existsSync(WELCOME_SOUND)) {
-            const stats = fs.statSync(WELCOME_SOUND);
-            message.reply(`✅ **Sound file found!**
-📁 **Path:** \`${WELCOME_SOUND}\`
-📏 **Size:** ${(stats.size / 1024 / 1024).toFixed(2)} MB
-🔊 **Volume:** ${Math.round(AUDIO_VOLUME * 100)}%`);
-        } else {
-            message.reply(`❌ **Sound file NOT found!**
-📁 **Expected path:** \`${WELCOME_SOUND}\`
-💡 **Solution:** Create a 'sounds' folder and add 'The Going Merry One Piece.ogg'`);
-        }
-    }
-    
-    // Test voice logging command
-    if (message.content === '!testlog') {
-        if (!message.member.permissions.has(PermissionFlagsBits.ManageChannels)) {
-            return message.reply('❌ You need Manage Channels permission to test logging!');
-        }
-
-        try {
-            // Test if the channel exists
-            const channelId = process.env.VOICE_LOG_CHANNEL_ID;
-            if (!channelId) {
-                return message.reply('❌ VOICE_LOG_CHANNEL_ID not set in environment variables!');
-            }
-
-            const testChannel = message.guild.channels.cache.get(channelId);
-            if (!testChannel) {
-                return message.reply(`❌ Channel with ID ${channelId} not found in this server!`);
-            }
-
-            // Test sending a message
-            await testChannel.send('🧪 **Test Message** - Voice logging should work if you can see this!');
-            
-            // Test sending an embed (like the voice logs)
-            const testEmbed = new EmbedBuilder()
-                .setColor('#00FF00')
-                .setTitle('🧪 Test Voice Log')
-                .setDescription(`<@${message.author.id}> joined <#${message.channel.id}>`)
-                .addFields(
-                    { name: '👤 User', value: message.author.displayName, inline: true },
-                    { name: '🏠 Channel', value: 'Test Channel', inline: true }
-                )
-                .setTimestamp()
-                .setFooter({ text: 'Voice Activity Logger - TEST' });
-
-            await testChannel.send({ embeds: [testEmbed] });
-            
-            message.reply(`✅ Test successful! Check ${testChannel} for test messages.`);
-        } catch (error) {
-            message.reply(`❌ Error testing channel: ${error.message}`);
-            console.error('Test log error:', error);
-        }
-    }
-
-    // Debug voice logging status
-    if (message.content === '!debuglog') {
-        if (!message.member.permissions.has(PermissionFlagsBits.ManageChannels)) {
-            return message.reply('❌ You need Manage Channels permission!');
-        }
-
-        const status = `🔍 **Voice Logging Debug Info:**
-**Enabled:** ${process.env.ENABLE_VOICE_LOGGING}
-**Channel ID:** ${process.env.VOICE_LOG_CHANNEL_ID || 'Not set'}
-**Channel Name Fallback:** ${process.env.VOICE_LOG_CHANNEL || 'voice-activity-log'}
-**Voice Tracker Active:** ${voiceTimeTracker ? 'Yes' : 'No'}
-**Active Sessions:** ${voiceTimeTracker ? voiceTimeTracker.getActiveSessionsCount() : 0}`;
-
-        message.reply(status);
-    }
-    if (message.content === '!createvoicelog') {
-        if (!message.member.permissions.has(PermissionFlagsBits.ManageChannels)) {
-            return message.reply('❌ You need Manage Channels permission to create the voice log channel!');
-        }
-
-        try {
-            const newChannel = await voiceTimeTracker.createLogChannel(message.guild);
-            if (newChannel) {
-                message.reply(`✅ Created voice log channel: ${newChannel}\n🔍 Voice activity will now be logged here!`);
-            } else {
-                message.reply('❌ Error creating voice log channel. Please check bot permissions.');
-            }
-        } catch (error) {
-            console.error('❌ Error creating voice log channel:', error);
-            message.reply('❌ Error creating voice log channel. Please check bot permissions.');
-        }
-    }
-    if (message.content === '!help') {
-        message.reply(`🏴‍☠️ **One Piece Voice Bot Commands**
-
-**📊 Voice Tracking:**
-\`/check-voice-time [@user]\` - Check voice time for a user (NEW!)
-\`/voice-leaderboard [limit]\` - Show top voice users (NEW!)
-\`/bot-info\` - Show bot information (NEW!)
-\`!voicestats\` - Legacy voice stats command
-\`!ping\` - Check bot latency
-
-**🎵 Audio Testing:**
-\`!testsound\` - Test welcome sound in your current voice channel
-\`!checksound\` - Check if sound file exists and show details
-
-**🚢 How to Use:**
-1. Join "${CREATE_CHANNEL_NAME}" voice channel
-2. Bot will create a new crew with a One Piece themed name
-3. You become the captain with full channel permissions
-4. Bot plays welcome sound (if file exists)
-5. Empty crews are automatically deleted after ${DELETE_DELAY/1000} seconds
-6. Voice time is automatically tracked!
-
-**🎯 Features:**
-• Dynamic voice channel creation with One Piece themed names
-• **Simplified voice time tracking (total time only)**
-• Captain permissions for channel creators
-• Automatic cleanup of empty channels
-• Welcome sounds with The Going Merry theme
-• **Slash commands for better user experience**
-
-**💡 Use slash commands (/) for the best experience!**`);
-    }
-});
-
-// Error handling
-client.on('error', error => {
-    console.error('❌ Discord client error:', error);
-});
-
-client.on('warn', warning => {
-    console.warn('⚠️ Discord client warning:', warning);
-});
-
-process.on('unhandledRejection', error => {
-    console.error('❌ Unhandled promise rejection:', error);
-});
-
-process.on('uncaughtException', error => {
-    console.error('❌ Uncaught exception:', error);
-    process.exit(1);
-});
-
-process.on('SIGINT', gracefulShutdown);
-process.on('SIGTERM', gracefulShutdown);
-
-async function gracefulShutdown() {
-    log('🛑 Shutting down bot gracefully...');
-    
-    try {
-        // End all active voice sessions
-        if (voiceTimeTracker) {
-            await voiceTimeTracker.endAllSessions();
-        }
-        
-        // Clean up voice connections
-        log(`🔌 Cleaning up ${activeConnections.size} voice connections...`);
-        activeConnections.forEach((connection, key) => {
-            try {
-                connection.destroy();
-                debugLog(`🔌 Destroyed connection for ${key}`);
-            } catch (error) {
-                // Ignore errors during shutdown
-            }
-        });
-        activeConnections.clear();
-        
-        // Close database connection
-        log('🗄️ Closing database connection...');
-        if (pool) {
-            await pool.end();
-        }
-        
-        // Destroy Discord client
-        client.destroy();
-        
-        log('👋 Bot shutdown complete!');
-    } catch (error) {
-        console.error('❌ Error during shutdown:', error);
-    }
-    
-    process.exit(0);
-}
-
-// Keep the process alive and log status
-setInterval(() => {
-    if (DEBUG) {
-        const activeSessions = voiceTimeTracker ? voiceTimeTracker.getActiveSessionsCount() : 0;
-        console.log(`🏴‍☠️ Bot Status - Guilds: ${client.guilds.cache.size}, Active Voice Sessions: ${activeSessions}, Audio Connections: ${activeConnections.size}, Uptime: ${Math.floor(process.uptime()/60)}m`);
-    }
-}, 300000); // Log every 5 minutes in debug mode
-
-// Start the bot
-async function startBot() {
-    log('🚀 Starting One Piece Dynamic Voice Bot...');
-    log(`🔑 Discord Token: ${DISCORD_TOKEN ? '✅ Provided' : '❌ MISSING'}`);
-    log(`🆔 Client ID: ${CLIENT_ID ? '✅ Provided' : '❌ MISSING'}`);
-    log(`🗄️ Database URL: ${process.env.DATABASE_URL ? '✅ Provided' : '❌ MISSING'}`);
-
-    if (!DISCORD_TOKEN) {
-        console.error('❌ DISCORD_TOKEN is required! Please check your .env file.');
-        process.exit(1);
-    }
-
-    if (!CLIENT_ID) {
-        console.error('❌ CLIENT_ID is required for slash commands! Please check your .env file.');
-        process.exit(1);
-    }
-
-    if (!process.env.DATABASE_URL) {
-        console.error('❌ DATABASE_URL is required! Please check your .env file.');
-        process.exit(1);
-    }
-
-    try {
-        await client.login(DISCORD_TOKEN);
-    } catch (error) {
-        console.error('❌ Failed to login to Discord:', error);
-        process.exit(1);
-    }
-}
-
-// Start the bot
-startBot();
