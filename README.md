@@ -17,10 +17,12 @@ A Discord bot that creates dynamic voice channels with authentic One Piece locat
 
 - ✅ **Removed Audio Features** - No more soundboard or voice detection
 - ✅ **PostgreSQL Integration** - Persistent data storage
+- ✅ **Auto-Database Creation** - Database creates itself if it doesn't exist
 - ✅ **Permission Syncing** - Channels inherit category permissions
 - ✅ **Voice Analytics** - Track user voice activity over time
 - ✅ **Category Memory** - Bot remembers where you move the category
 - ✅ **Enhanced Commands** - More detailed stats and bot information
+- ✅ **Zero Manual Setup** - No SQL scripts to run manually
 
 ## 🚀 Quick Start
 
@@ -45,13 +47,13 @@ cp .env.example .env
 
 ### 3. Database Setup
 
-```bash
-# Create PostgreSQL database
-createdb discord_bot
+**No manual setup required!** The bot will automatically:
+- ✅ Check if the database exists
+- ✅ Create the database if it doesn't exist
+- ✅ Create all required tables and indexes
+- ✅ Handle database connections properly
 
-# Run the setup SQL (optional - bot creates tables automatically)
-psql discord_bot < database_setup.sql
-```
+Just make sure PostgreSQL is running and your `DATABASE_URL` is correct:
 
 ### 4. Configuration
 
@@ -184,8 +186,8 @@ npm run dev
 
 ### Testing Database Connection
 ```bash
-# Test PostgreSQL connection
-psql $DATABASE_URL -c "SELECT NOW();"
+# Test PostgreSQL connection (the bot will create the database automatically)
+psql postgresql://username:password@localhost:5432/postgres -c "SELECT NOW();"
 ```
 
 ### Monitoring Logs
