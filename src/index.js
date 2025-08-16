@@ -459,11 +459,12 @@ async function disconnectAFKUser(member, channel, inactiveTime) {
 async function playWelcomeSound(channel) {
     try {
         if (!fs.existsSync(WELCOME_SOUND)) {
-            debugLog(`Welcome sound file not found: ${WELCOME_SOUND}`);
+            debugLog(`❌ Welcome sound file not found: ${WELCOME_SOUND}`);
+            log(`⚠️ Create a 'sounds' folder and add 'The Going Merry One Piece.ogg' file`);
             return;
         }
 
-        debugLog(`🎵 Playing welcome sound in ${channel.name}`);
+        log(`🎵 Attempting to join ${channel.name} to play welcome sound...`);
 
         const connection = joinVoiceChannel({
             channelId: channel.id,
@@ -472,49 +473,61 @@ async function playWelcomeSound(channel) {
         });
 
         activeConnections.set(channel.id, connection);
+        log(`🔌 Voice connection created for ${channel.name}`);
 
-        const player = createAudioPlayer();
-        const resource = createAudioResource(WELCOME_SOUND, { 
-            inlineVolume: true 
-        });
-        
-        resource.volume.setVolume(AUDIO_VOLUME);
-
-        player.play(resource);
-        connection.subscribe(player);
-
-        player.on(AudioPlayerStatus.Playing, () => {
-            debugLog(`🎵 ✅ Welcome sound playing in ${channel.name}`);
-        });
-
-        player.on(AudioPlayerStatus.Idle, () => {
-            debugLog(`🎵 Welcome sound finished in ${channel.name}`);
-            // Disconnect after sound finishes
-            setTimeout(() => {
-                if (activeConnections.has(channel.id)) {
-                    const conn = activeConnections.get(channel.id);
-                    conn.destroy();
-                    activeConnections.delete(channel.id);
-                    debugLog(`🔌 Disconnected from ${channel.name} after welcome sound`);
+        connection.on(VoiceConnectionStatus.Ready, () => {
+            log(`✅ Voice connection ready in ${channel.name}, starting audio...`);
+            
+            try {
+                const player = createAudioPlayer();
+                const resource = createAudioResource(WELCOME_SOUND, { 
+                    inlineVolume: true 
+                });
+                
+                if (resource.volume) {
+                    resource.volume.setVolume(AUDIO_VOLUME);
                 }
-            }, 2000); // Wait 2 seconds before disconnecting
-        });
 
-        player.on('error', error => {
-            console.error(`❌ Audio player error in ${channel.name}:`, error);
-            if (activeConnections.has(channel.id)) {
-                const conn = activeConnections.get(channel.id);
-                conn.destroy();
+                player.play(resource);
+                connection.subscribe(player);
+                
+                log(`🎵 Audio player started in ${channel.name}`);
+
+                player.on(AudioPlayerStatus.Playing, () => {
+                    log(`🎵 ✅ Welcome sound now playing in ${channel.name}!`);
+                });
+
+                player.on(AudioPlayerStatus.Idle, () => {
+                    log(`🎵 Welcome sound finished in ${channel.name}`);
+                    // Disconnect after sound finishes
+                    setTimeout(() => {
+                        if (activeConnections.has(channel.id)) {
+                            const conn = activeConnections.get(channel.id);
+                            conn.destroy();
+                            activeConnections.delete(channel.id);
+                            log(`🔌 Disconnected from ${channel.name} after welcome sound`);
+                        }
+                    }, 2000);
+                });
+
+                player.on('error', error => {
+                    console.error(`❌ Audio player error in ${channel.name}:`, error);
+                    if (activeConnections.has(channel.id)) {
+                        const conn = activeConnections.get(channel.id);
+                        conn.destroy();
+                        activeConnections.delete(channel.id);
+                    }
+                });
+                
+            } catch (audioError) {
+                console.error(`❌ Error creating audio player:`, audioError);
+                connection.destroy();
                 activeConnections.delete(channel.id);
             }
         });
 
-        connection.on(VoiceConnectionStatus.Ready, () => {
-            debugLog(`🔌 Voice connection ready in ${channel.name}`);
-        });
-
         connection.on(VoiceConnectionStatus.Disconnected, () => {
-            debugLog(`🔌 Voice connection disconnected from ${channel.name}`);
+            log(`🔌 Voice connection disconnected from ${channel.name}`);
             activeConnections.delete(channel.id);
         });
 
@@ -523,8 +536,25 @@ async function playWelcomeSound(channel) {
             activeConnections.delete(channel.id);
         });
 
+        // Add timeout in case connection fails
+        setTimeout(() => {
+            if (activeConnections.has(channel.id)) {
+                const conn = activeConnections.get(channel.id);
+                if (conn.state.status !== VoiceConnectionStatus.Ready) {
+                    log(`⚠️ Connection timeout for ${channel.name}, destroying...`);
+                    conn.destroy();
+                    activeConnections.delete(channel.id);
+                }
+            }
+        }, 10000); // 10 second timeout
+
     } catch (error) {
-        console.error(`❌ Error playing welcome sound in ${channel.name}:`, error);
+        console.error(`❌ Error in playWelcomeSound for ${channel.name}:`, error);
+        if (activeConnections.has(channel.id)) {
+            const conn = activeConnections.get(channel.id);
+            conn.destroy();
+            activeConnections.delete(channel.id);
+        }
     }
 }
 async function syncChannelWithCategory(channel, category, creatorId) {
@@ -750,10 +780,12 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
                     await member.voice.setChannel(newChannel);
                     debugLog(`✅ Successfully moved ${member.displayName} to ${crewName}`);
                     
-                    // Play welcome sound after moving user
+                    // Play welcome sound after moving user - increased delay
+                    log(`🎵 Scheduling welcome sound for ${crewName} in 3 seconds...`);
                     setTimeout(() => {
+                        log(`🎵 Now attempting to play welcome sound in ${crewName}`);
                         playWelcomeSound(newChannel);
-                    }, 1000); // Wait 1 second for user to fully connect
+                    }, 3000); // Wait 3 seconds for user to fully connect
                     
                 } else {
                     debugLog(`User ${member.displayName} disconnected before move, cleaning up channel`);
@@ -945,7 +977,30 @@ client.on('messageCreate', async (message) => {
         }
     }
     
-    // Help command
+    // Debug sound test command
+    if (message.content === '!testsound') {
+        if (!message.member.voice.channel) {
+            return message.reply('❌ You need to be in a voice channel to test the sound!');
+        }
+        
+        message.reply('🎵 Testing welcome sound...');
+        playWelcomeSound(message.member.voice.channel);
+    }
+    
+    // Check sound file command
+    if (message.content === '!checksound') {
+        if (fs.existsSync(WELCOME_SOUND)) {
+            const stats = fs.statSync(WELCOME_SOUND);
+            message.reply(`✅ **Sound file found!**
+📁 **Path:** \`${WELCOME_SOUND}\`
+📏 **Size:** ${(stats.size / 1024 / 1024).toFixed(2)} MB
+🔊 **Volume:** ${Math.round(AUDIO_VOLUME * 100)}%`);
+        } else {
+            message.reply(`❌ **Sound file NOT found!**
+📁 **Expected path:** \`${WELCOME_SOUND}\`
+💡 **Solution:** Create a 'sounds' folder and add 'The Going Merry One Piece.ogg'`);
+        }
+    }
     if (message.content === '!help') {
         message.reply(`🏴‍☠️ **One Piece Voice Bot Commands**
 
