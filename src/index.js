@@ -12,11 +12,60 @@ const DEFAULT_CATEGORY_NAME = process.env.CATEGORY_NAME || '🌊 Grand Line Voic
 const DELETE_DELAY = parseInt(process.env.DELETE_DELAY) || 5000;
 const DEBUG = process.env.DEBUG === 'true';
 
-// PostgreSQL connection
-const pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-    ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
-});
+// PostgreSQL connection with auto-database creation
+let pool;
+
+async function initializeConnection() {
+    const databaseUrl = process.env.DATABASE_URL;
+    
+    if (!databaseUrl) {
+        throw new Error('DATABASE_URL environment variable is required');
+    }
+    
+    // Parse the database URL to get connection details
+    const url = new URL(databaseUrl);
+    const dbName = url.pathname.slice(1); // Remove leading slash
+    
+    // Create connection without database name first (to create database if needed)
+    const adminUrl = new URL(databaseUrl);
+    adminUrl.pathname = '/postgres'; // Connect to default postgres database
+    
+    const adminPool = new Pool({
+        connectionString: adminUrl.toString(),
+        ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+    });
+    
+    try {
+        // Check if database exists
+        const result = await adminPool.query(
+            'SELECT 1 FROM pg_database WHERE datname = $1',
+            [dbName]
+        );
+        
+        if (result.rows.length === 0) {
+            // Database doesn't exist, create it
+            log(`🗄️ Database '${dbName}' doesn't exist, creating it...`);
+            await adminPool.query(`CREATE DATABASE "${dbName}"`);
+            log(`✅ Database '${dbName}' created successfully!`);
+        } else {
+            debugLog(`🗄️ Database '${dbName}' already exists`);
+        }
+        
+        await adminPool.end();
+        
+        // Now create the main pool with the actual database
+        pool = new Pool({
+            connectionString: databaseUrl,
+            ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+        });
+        
+        log('🗄️ PostgreSQL connection established');
+        
+    } catch (error) {
+        await adminPool.end();
+        throw error;
+    }
+}
 
 // One Piece themed channel names
 const CREW_NAMES = [
