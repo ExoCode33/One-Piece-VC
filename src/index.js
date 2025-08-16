@@ -7,10 +7,17 @@ require('dotenv').config();
 // Configuration
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
-const CREATE_CHANNEL_NAME = process.env.CREATE_CHANNEL_NAME || '🏴 Set Sail Together';
-const DEFAULT_CATEGORY_NAME = process.env.CATEGORY_NAME || '🌊 Grand Line Voice Channels';
-const DELETE_DELAY = parseInt(process.env.DELETE_DELAY) || 5000;
+const CREATE_CHANNEL_NAME = process.env.CREATE_CHANNEL_NAME || '🏴〢Set Sail Together';
+const DEFAULT_CATEGORY_NAME = process.env.CATEGORY_NAME || '✘ SOCIAL ✘';
+const DELETE_DELAY = parseInt(process.env.DELETE_DELAY) || 1000;
 const DEBUG = process.env.DEBUG === 'true';
+
+// AFK Management Configuration
+const AFK_TIMEOUT = parseInt(process.env.AFK_TIMEOUT) || 900000; // 15 minutes default
+const AFK_EXCLUDED_CHANNELS = process.env.AFK_EXCLUDED_CHANNELS ? 
+    process.env.AFK_EXCLUDED_CHANNELS.split(',').map(name => name.trim()) : 
+    ['🌇〢Lofi'];
+const AUDIO_VOLUME = parseFloat(process.env.AUDIO_VOLUME) || 0.4;
 
 // PostgreSQL connection with auto-database creation
 let pool;
@@ -111,8 +118,28 @@ const client = new Client({
     ]
 });
 
-// Track user voice sessions
+// Track user voice sessions and AFK status
 const voiceSessions = new Map(); // userId -> { sessionId, joinTime, channelId, channelName }
+const afkUsers = new Map(); // userId -> { channelId, startTime, isAfk }
+
+// One Piece themed disconnect messages for AFK users
+const onePieceDisconnectMessages = [
+    "🌊 {user} got swept away by the Grand Line currents!",
+    "💤 {user} fell asleep like Zoro during navigation...",
+    "🏃 {user} ran away from the Marines!",
+    "🍖 {user} went hunting for Sea King meat!",
+    "⚓ {user} got lost like Zoro (auto-disconnected)",
+    "🌪️ {user} was caught in a sudden storm!",
+    "🏝️ {user} went exploring a mysterious island!",
+    "🎣 {user} went fishing with Usopp!",
+    "🍺 {user} passed out from too much sake!",
+    "📚 {user} fell asleep reading poneglyphs with Robin...",
+    "🎵 {user} drifted away listening to Brook's music!",
+    "⚡ {user} was struck by Enel's lightning!",
+    "🌸 {user} got distracted by cherry blossoms in Wano!",
+    "🐟 {user} went swimming with the Fish-Men!",
+    "🔥 {user} got too close to Ace's flames!"
+];
 
 // Helper functions
 function log(message) {
