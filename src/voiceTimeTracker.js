@@ -1,9 +1,12 @@
 // src/voiceTimeTracker.js
+const ChannelLogger = require('./channelLogger');
+
 class VoiceTimeTracker {
     constructor(client, pool) {
         this.client = client;
         this.pool = pool;
         this.activeSessions = new Map(); // userId -> { joinTime, channelId, channelName }
+        this.channelLogger = new ChannelLogger(client); // Add channel logging
         
         // Initialize database table for voice time tracking
         this.initializeVoiceTimeTable();
@@ -52,15 +55,32 @@ class VoiceTimeTracker {
         // User joined voice
         if (!oldState.channelId && newState.channelId) {
             this.startSession(userId, username, guildId, newState.channelId, newState.channel.name);
+            
+            // Log to channel
+            await this.channelLogger.logVoiceEvent(
+                guildId, userId, username, newState.channelId, newState.channel.name, 'JOIN'
+            );
         }
         // User left voice
         else if (oldState.channelId && !newState.channelId) {
-            await this.endSession(userId, username, guildId);
+            const sessionDuration = await this.endSession(userId, username, guildId);
+            
+            // Log to channel with duration
+            await this.channelLogger.logVoiceEvent(
+                guildId, userId, username, oldState.channelId, oldState.channel.name, 'LEAVE',
+                { sessionDuration }
+            );
         }
         // User moved between channels (end old session, start new one)
         else if (oldState.channelId && newState.channelId && oldState.channelId !== newState.channelId) {
             await this.endSession(userId, username, guildId);
             this.startSession(userId, username, guildId, newState.channelId, newState.channel.name);
+            
+            // Log to channel
+            await this.channelLogger.logVoiceEvent(
+                guildId, userId, username, newState.channelId, newState.channel.name, 'MOVE',
+                { oldChannelName: oldState.channel.name }
+            );
         }
     }
 
@@ -78,7 +98,7 @@ class VoiceTimeTracker {
 
     async endSession(userId, username, guildId) {
         const session = this.activeSessions.get(userId);
-        if (!session) return;
+        if (!session) return 0;
 
         const duration = Math.floor((new Date() - session.joinTime) / 1000); // Duration in seconds
         
@@ -89,6 +109,7 @@ class VoiceTimeTracker {
         this.activeSessions.delete(userId);
         
         console.log(`👋 Ended tracking: ${username} - ${Math.floor(duration / 60)}m ${duration % 60}s`);
+        return duration;
     }
 
     async addVoiceTime(userId, username, guildId, seconds) {
@@ -170,6 +191,11 @@ class VoiceTimeTracker {
     // Get current active sessions count
     getActiveSessionsCount() {
         return this.activeSessions.size;
+    }
+
+    // Method to create log channel
+    async createLogChannel(guild) {
+        return await this.channelLogger.createLogChannel(guild);
     }
 }
 
