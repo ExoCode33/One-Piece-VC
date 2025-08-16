@@ -310,7 +310,7 @@ async function playWelcomeSound(channel) {
             return;
         }
 
-        log(`🎵 Attempting to join ${channel.name} to play welcome sound...`);
+        log(`🎵 Joining ${channel.name} for welcome sound...`);
 
         const connection = joinVoiceChannel({
             channelId: channel.id,
@@ -319,13 +319,11 @@ async function playWelcomeSound(channel) {
         });
 
         activeConnections.set(channel.id, connection);
-        log(`🔌 Voice connection created for ${channel.name}`);
 
         const playAudio = () => {
             try {
                 const player = createAudioPlayer();
                 
-                // Try to create audio resource with different options for better compatibility
                 let resource;
                 try {
                     resource = createAudioResource(WELCOME_SOUND, { 
@@ -333,12 +331,11 @@ async function playWelcomeSound(channel) {
                         inputType: 'arbitrary'
                     });
                 } catch (ffmpegError) {
-                    console.warn(`⚠️ FFmpeg issue, trying alternative method:`, ffmpegError.message);
+                    console.warn(`⚠️ FFmpeg issue, trying alternative:`, ffmpegError.message);
                     try {
-                        // Try without inline volume if FFmpeg fails
                         resource = createAudioResource(WELCOME_SOUND);
                     } catch (fallbackError) {
-                        console.error(`❌ All audio resource creation methods failed:`, fallbackError);
+                        console.error(`❌ Audio creation failed:`, fallbackError);
                         connection.destroy();
                         activeConnections.delete(channel.id);
                         return;
@@ -352,27 +349,20 @@ async function playWelcomeSound(channel) {
                 player.play(resource);
                 connection.subscribe(player);
                 
-                log(`🎵 Audio player started in ${channel.name}`);
-
-                player.on(AudioPlayerStatus.Playing, () => {
-                    log(`🎵 ✅ Welcome sound now playing in ${channel.name}!`);
-                });
+                log(`🎵 ✅ Playing welcome sound in ${channel.name}!`);
 
                 player.on(AudioPlayerStatus.Idle, () => {
-                    log(`🎵 Welcome sound finished in ${channel.name}`);
-                    // Disconnect after sound finishes
-                    setTimeout(() => {
-                        if (activeConnections.has(channel.id)) {
-                            const conn = activeConnections.get(channel.id);
-                            conn.destroy();
-                            activeConnections.delete(channel.id);
-                            log(`🔌 Disconnected from ${channel.name} after welcome sound`);
-                        }
-                    }, 2000);
+                    log(`🎵 Welcome sound finished, leaving ${channel.name}`);
+                    // Leave immediately when sound finishes
+                    if (activeConnections.has(channel.id)) {
+                        const conn = activeConnections.get(channel.id);
+                        conn.destroy();
+                        activeConnections.delete(channel.id);
+                    }
                 });
 
                 player.on('error', error => {
-                    console.error(`❌ Audio player error in ${channel.name}:`, error);
+                    console.error(`❌ Audio error in ${channel.name}:`, error);
                     if (activeConnections.has(channel.id)) {
                         const conn = activeConnections.get(channel.id);
                         conn.destroy();
@@ -381,42 +371,41 @@ async function playWelcomeSound(channel) {
                 });
                 
             } catch (audioError) {
-                console.error(`❌ Error creating audio player:`, audioError);
-                log(`💡 This might be due to missing FFmpeg. Audio features will be skipped.`);
+                console.error(`❌ Audio setup error:`, audioError);
                 connection.destroy();
                 activeConnections.delete(channel.id);
             }
         };
 
         connection.on(VoiceConnectionStatus.Ready, () => {
-            log(`✅ Voice connection ready in ${channel.name}, starting audio...`);
+            log(`✅ Connected to ${channel.name}, starting audio...`);
             playAudio();
         });
 
         connection.on(VoiceConnectionStatus.Disconnected, () => {
-            log(`🔌 Voice connection disconnected from ${channel.name}`);
             activeConnections.delete(channel.id);
+            debugLog(`🔌 Disconnected from ${channel.name}`);
         });
 
         connection.on('error', error => {
-            console.error(`❌ Voice connection error in ${channel.name}:`, error);
+            console.error(`❌ Connection error in ${channel.name}:`, error);
             activeConnections.delete(channel.id);
         });
 
-        // Add timeout in case connection fails
+        // Faster timeout for connection issues
         setTimeout(() => {
             if (activeConnections.has(channel.id)) {
                 const conn = activeConnections.get(channel.id);
                 if (conn.state.status !== VoiceConnectionStatus.Ready) {
-                    log(`⚠️ Connection timeout for ${channel.name}, destroying...`);
+                    log(`⚠️ Connection timeout for ${channel.name}`);
                     conn.destroy();
                     activeConnections.delete(channel.id);
                 }
             }
-        }, 10000); // 10 second timeout
+        }, 5000); // Reduced from 10 seconds to 5 seconds
 
     } catch (error) {
-        console.error(`❌ Error in playWelcomeSound for ${channel.name}:`, error);
+        console.error(`❌ Error joining ${channel.name}:`, error);
         if (activeConnections.has(channel.id)) {
             const conn = activeConnections.get(channel.id);
             conn.destroy();
@@ -678,12 +667,11 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
                     await member.voice.setChannel(newChannel);
                     debugLog(`✅ Successfully moved ${member.displayName} to ${crewName}`);
                     
-                    // Play welcome sound after moving user - increased delay
-                    log(`🎵 Scheduling welcome sound for ${crewName} in 3 seconds...`);
+                    // Play welcome sound immediately after moving user
+                    log(`🎵 Playing welcome sound in ${crewName}...`);
                     setTimeout(() => {
-                        log(`🎵 Now attempting to play welcome sound in ${crewName}`);
                         playWelcomeSound(newChannel);
-                    }, 3000); // Wait 3 seconds for user to fully connect
+                    }, 1500); // Reduced from 3 seconds to 1.5 seconds
                     
                 } else {
                     debugLog(`User ${member.displayName} disconnected before move, cleaning up channel`);
@@ -829,7 +817,25 @@ client.on('messageCreate', async (message) => {
 🎤 **Features:** Dynamic Voice Channels, Voice Time Tracking, Welcome Sounds`);
     }
     
-    // Debug sound test command
+    // Fast sound test command for speed testing
+    if (message.content === '!fastsound') {
+        if (!message.member.voice.channel) {
+            return message.reply('❌ You need to be in a voice channel!');
+        }
+        
+        const startTime = Date.now();
+        message.reply('🎵 Testing fast welcome sound...').then(() => {
+            playWelcomeSound(message.member.voice.channel);
+            
+            // Report timing
+            setTimeout(() => {
+                const totalTime = Date.now() - startTime;
+                message.channel.send(`⏱️ **Speed Test Results:**
+🚀 **Total time:** ${totalTime}ms
+🎯 **Target:** Under 2000ms for good performance`);
+            }, 3000);
+        });
+    }
     if (message.content === '!testsound') {
         if (!message.member.voice.channel) {
             return message.reply('❌ You need to be in a voice channel to test the sound!');
@@ -866,6 +872,7 @@ client.on('messageCreate', async (message) => {
 
 **🎵 Audio Testing:**
 \`!testsound\` - Test welcome sound in your current voice channel
+\`!fastsound\` - Speed test for bot join/play/leave timing
 \`!checksound\` - Check if sound file exists and show details
 
 **🚢 How to Use:**
@@ -924,7 +931,7 @@ async function gracefulShutdown() {
                 connection.destroy();
                 debugLog(`🔌 Destroyed connection for ${key}`);
             } catch (error) {
-                console.error(`❌ Error destroying connection ${key}:`, error);
+                // Ignore errors during shutdown
             }
         });
         activeConnections.clear();
