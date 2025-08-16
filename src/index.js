@@ -857,24 +857,6 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
     }
 });
 
-// Listen for speaking events to detect voice activity
-client.on('voiceStateUpdate', (oldState, newState) => {
-    const member = newState.member || oldState.member;
-    const userId = member.id;
-    
-    // Set up speaking detection when user joins a channel
-    if (newState.channel && !oldState.channel) {
-        // User joined a channel, start monitoring their voice activity
-        const connection = newState.guild.voiceAdapterCreator.createAdapter(newState.channel);
-        if (connection) {
-            // Note: Discord.js v14 doesn't have direct speaking events
-            // We'll rely on state changes and periodic checks for now
-            // Any voice state change indicates activity
-            updateUserActivity(userId);
-        }
-    }
-});
-
 // Handle category moves - sync to database when category is moved/renamed
 client.on('channelUpdate', async (oldChannel, newChannel) => {
     try {
