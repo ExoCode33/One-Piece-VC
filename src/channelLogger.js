@@ -88,8 +88,8 @@ class ChannelLogger {
 
     createLogEmbed(userId, username, channelId, channelName, action, additionalInfo) {
         const embed = new EmbedBuilder()
-            .setTimestamp()
-            .setFooter({ text: 'Voice Activity Logger' });
+            .setTimestamp() // This automatically uses Discord's timestamp system
+            .setFooter({ text: 'Voice Activity Logger' }); // Remove timestamp from footer
 
         const userMention = `<@${userId}>`;
         const channelMention = channelId ? `<#${channelId}>` : 'Unknown Channel';
@@ -102,7 +102,8 @@ class ChannelLogger {
                     .setDescription(`${userMention} joined ${channelMention}`)
                     .addFields(
                         { name: '👤 User', value: `${username}`, inline: true },
-                        { name: '🏠 Channel', value: `${channelName || 'Unknown'}`, inline: true }
+                        { name: '🏠 Channel', value: `${channelName || 'Unknown'}`, inline: true },
+                        { name: '🕐 Time', value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: true }
                     );
                 break;
 
@@ -113,7 +114,8 @@ class ChannelLogger {
                     .setDescription(`${userMention} left ${channelMention}`)
                     .addFields(
                         { name: '👤 User', value: `${username}`, inline: true },
-                        { name: '🏠 Channel', value: `${channelName || 'Unknown'}`, inline: true }
+                        { name: '🏠 Channel', value: `${channelName || 'Unknown'}`, inline: true },
+                        { name: '🕐 Time', value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: true }
                     );
 
                 // Add session duration if available
@@ -140,7 +142,8 @@ class ChannelLogger {
                     .addFields(
                         { name: '👤 User', value: `${username}`, inline: true },
                         { name: '🏠 From', value: `${additionalInfo.oldChannelName || 'Unknown'}`, inline: true },
-                        { name: '🏠 To', value: `${channelName || 'Unknown'}`, inline: true }
+                        { name: '🏠 To', value: `${channelName || 'Unknown'}`, inline: true },
+                        { name: '🕐 Time', value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: true }
                     );
                 break;
 
@@ -152,7 +155,8 @@ class ChannelLogger {
                     .addFields(
                         { name: '👤 User', value: `${username}`, inline: true },
                         { name: '🏠 Channel', value: `${channelName || 'Unknown'}`, inline: true },
-                        { name: '🔧 Action', value: action, inline: true }
+                        { name: '🔧 Action', value: action, inline: true },
+                        { name: '🕐 Time', value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: true }
                     );
         }
 
