@@ -1,22 +1,26 @@
 {
   "name": "one-piece-discord-bot",
-  "version": "1.0.0",
-  "description": "A One Piece themed Discord bot that dynamically creates and manages voice channels with authentic sound effects",
+  "version": "2.0.0",
+  "description": "A One Piece themed Discord bot that dynamically creates and manages voice channels with PostgreSQL tracking and permission syncing",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
-    "dev": "node src/index.js"
+    "dev": "node src/index.js",
+    "test": "node src/index.js"
   },
+  "keywords": ["discord", "bot", "voice", "one-piece", "postgresql", "dynamic-channels"],
   "author": "ExoCode33",
   "license": "MIT",
   "dependencies": {
     "discord.js": "^14.16.3",
     "dotenv": "^16.4.5",
-    "@discordjs/voice": "^0.17.0",
-    "libsodium-wrappers": "^0.7.13",
-    "opusscript": "^0.0.8"
+    "pg": "^8.11.3"
   },
   "engines": {
     "node": ">=18.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "your-repo-url-here"
   }
 }
