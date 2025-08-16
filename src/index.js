@@ -1,5 +1,5 @@
 const { Client, GatewayIntentBits, ChannelType, PermissionFlagsBits } = require('discord.js');
-const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, VoiceConnectionStatus } = require('@discordjs/voice');
+const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, VoiceConnectionStatus, createAudioReceiver } = require('@discordjs/voice');
 const { Pool } = require('pg');
 const fs = require('fs');
 const path = require('path');
@@ -122,10 +122,11 @@ const client = new Client({
     ]
 });
 
-// Track user voice sessions and AFK status
+// Track user voice sessions, AFK status, and speaking receivers
 const voiceSessions = new Map(); // userId -> { sessionId, joinTime, channelId, channelName }
-const afkUsers = new Map(); // userId -> { channelId, startTime, isAfk }
+const afkUsers = new Map(); // userId -> { channelId, lastActivity, isAfk }
 const activeConnections = new Map(); // channelId -> voice connection
+const speakingReceivers = new Map(); // channelId -> audio receiver for speaking detection
 
 // Audio file paths
 const SOUNDS_DIR = path.join(__dirname, '..', 'sounds');
@@ -339,8 +340,84 @@ function trackAFKUser(userId, channelId, isAfk = false) {
         isAfk: false // Start as active
     });
     
+    // Set up speaking detection for this channel if not already done
+    setupSpeakingDetection(channelId);
+    
     if (DEBUG) {
         debugLog(`👁️ Now tracking voice activity for user ${userId} in channel ${channelId}`);
+    }
+}
+
+// Set up speaking detection for a voice channel
+async function setupSpeakingDetection(channelId) {
+    if (speakingReceivers.has(channelId)) {
+        return; // Already set up
+    }
+    
+    try {
+        const guild = client.guilds.cache.first();
+        if (!guild) return;
+        
+        const channel = guild.channels.cache.get(channelId);
+        if (!channel || channel.type !== ChannelType.GuildVoice) return;
+        
+        // Create a voice connection for speaking detection
+        const connection = joinVoiceChannel({
+            channelId: channelId,
+            guildId: guild.id,
+            adapterCreator: guild.voiceAdapterCreator,
+            selfDeaf: true, // We only want to detect speaking, not hear audio
+            selfMute: true
+        });
+        
+        connection.on(VoiceConnectionStatus.Ready, () => {
+            const receiver = connection.receiver;
+            speakingReceivers.set(channelId, receiver);
+            
+            debugLog(`🎧 Speaking detection ready for channel ${channelId}`);
+            
+            // Listen for speaking events
+            receiver.speaking.on('start', (userId) => {
+                updateUserActivity(userId);
+                debugLog(`🗣️ User ${userId} started speaking - activity updated`);
+            });
+            
+            receiver.speaking.on('end', (userId) => {
+                updateUserActivity(userId);
+                debugLog(`🤐 User ${userId} stopped speaking - activity updated`);
+            });
+        });
+        
+        connection.on(VoiceConnectionStatus.Disconnected, () => {
+            speakingReceivers.delete(channelId);
+            debugLog(`🔌 Speaking detection disconnected from channel ${channelId}`);
+        });
+        
+        connection.on('error', (error) => {
+            console.error(`❌ Speaking detection error for channel ${channelId}:`, error);
+            speakingReceivers.delete(channelId);
+        });
+        
+        // Store connection for cleanup
+        activeConnections.set(`speaking_${channelId}`, connection);
+        
+    } catch (error) {
+        console.error(`❌ Error setting up speaking detection for channel ${channelId}:`, error);
+    }
+}
+
+// Clean up speaking detection for a channel
+function cleanupSpeakingDetection(channelId) {
+    if (speakingReceivers.has(channelId)) {
+        speakingReceivers.delete(channelId);
+    }
+    
+    const speakingConnectionKey = `speaking_${channelId}`;
+    if (activeConnections.has(speakingConnectionKey)) {
+        const connection = activeConnections.get(speakingConnectionKey);
+        connection.destroy();
+        activeConnections.delete(speakingConnectionKey);
+        debugLog(`🧹 Cleaned up speaking detection for channel ${channelId}`);
     }
 }
 
@@ -888,6 +965,9 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
                     debugLog(`🔌 Cleaned up voice connection for ${oldChannel.name}`);
                 }
                 
+                // Clean up speaking detection
+                cleanupSpeakingDetection(oldChannel.id);
+                
                 setTimeout(async () => {
                     try {
                         const channelToDelete = oldChannel.guild.channels.cache.get(oldChannel.id);
@@ -1082,7 +1162,7 @@ client.on('messageCreate', async (message) => {
 
 **😴 AFK Management:**
 • Users disconnected after ${AFK_TIMEOUT/60000} minutes of voice inactivity
-• Mute/deafen status is ignored - only voice activity matters
+• Detects actual speaking activity, not just mute/deafen changes
 • Protected channels: ${AFK_EXCLUDED_CHANNELS.join(', ')}
 • Perfect for catching people who fall asleep in voice
 
@@ -1129,15 +1209,19 @@ async function gracefulShutdown() {
         
         // Clean up voice connections
         log(`🔌 Cleaning up ${activeConnections.size} voice connections...`);
-        activeConnections.forEach((connection, channelId) => {
+        activeConnections.forEach((connection, key) => {
             try {
                 connection.destroy();
-                debugLog(`🔌 Destroyed connection for channel ${channelId}`);
+                debugLog(`🔌 Destroyed connection for ${key}`);
             } catch (error) {
-                console.error(`❌ Error destroying connection ${channelId}:`, error);
+                console.error(`❌ Error destroying connection ${key}:`, error);
             }
         });
         activeConnections.clear();
+        
+        // Clear speaking receivers
+        log(`🎧 Cleaning up speaking detection...`);
+        speakingReceivers.clear();
         
         // Clear AFK tracking
         log(`😴 Clearing ${afkUsers.size} AFK tracking sessions...`);
@@ -1163,7 +1247,7 @@ async function gracefulShutdown() {
 // Keep the process alive and log status
 setInterval(() => {
     if (DEBUG) {
-        console.log(`🏴‍☠️ Bot Status - Guilds: ${client.guilds.cache.size}, Active Voice Sessions: ${voiceSessions.size}, AFK Tracked: ${afkUsers.size}, Audio Connections: ${activeConnections.size}, Uptime: ${Math.floor(process.uptime()/60)}m`);
+        console.log(`🏴‍☠️ Bot Status - Guilds: ${client.guilds.cache.size}, Active Voice Sessions: ${voiceSessions.size}, AFK Tracked: ${afkUsers.size}, Audio Connections: ${activeConnections.size}, Speaking Receivers: ${speakingReceivers.size}, Uptime: ${Math.floor(process.uptime()/60)}m`);
     }
 }, 300000); // Log every 5 minutes in debug mode
 
