@@ -415,20 +415,32 @@ client.once('ready', async () => {
                 .forEach(channel => {
                     channel.members.forEach(member => {
                         if (!member.user.bot) {
-                            // Start tracking existing users
-                            voiceTimeTracker.startSession(
-                                member.id, 
-                                member.displayName, 
-                                guild.id, 
-                                channel.id, 
-                                channel.name
-                            );
+                            const userId = member.id;
+                            const username = member.displayName;
+                            const guildId = guild.id;
+                            const channelId = channel.id;
+                            const channelName = channel.name;
                             
-                            log(`🔄 Now tracking existing user: ${member.displayName} in ${channel.name}`);
+                            // Start tracking existing users
+                            voiceTimeTracker.startSession(userId, username, guildId, channelId, channelName);
+                            
+                            log(`🔄 Now tracking existing user: ${username} in ${channelName}`);
                         }
                     });
                 });
         });
+
+        // Add debug logging for voice logging status
+        if (process.env.ENABLE_VOICE_LOGGING === 'true') {
+            log(`🔍 Voice channel logging is ENABLED`);
+            if (process.env.VOICE_LOG_CHANNEL_ID) {
+                log(`📝 Target log channel ID: ${process.env.VOICE_LOG_CHANNEL_ID}`);
+            } else {
+                log(`📝 Target log channel name: ${process.env.VOICE_LOG_CHANNEL || 'voice-activity-log'}`);
+            }
+        } else {
+            log(`⚠️ Voice channel logging is DISABLED`);
+        }
         
     } catch (error) {
         console.error('❌ Database initialization failed:', error);
@@ -790,7 +802,80 @@ client.on('messageCreate', async (message) => {
         }
     }
     
-    // Help command
+    // Test voice logging command
+    if (message.content === '!testlog') {
+        if (!message.member.permissions.has(PermissionFlagsBits.ManageChannels)) {
+            return message.reply('❌ You need Manage Channels permission to test logging!');
+        }
+
+        try {
+            // Test if the channel exists
+            const channelId = process.env.VOICE_LOG_CHANNEL_ID;
+            if (!channelId) {
+                return message.reply('❌ VOICE_LOG_CHANNEL_ID not set in environment variables!');
+            }
+
+            const testChannel = message.guild.channels.cache.get(channelId);
+            if (!testChannel) {
+                return message.reply(`❌ Channel with ID ${channelId} not found in this server!`);
+            }
+
+            // Test sending a message
+            await testChannel.send('🧪 **Test Message** - Voice logging should work if you can see this!');
+            
+            // Test sending an embed (like the voice logs)
+            const testEmbed = new EmbedBuilder()
+                .setColor('#00FF00')
+                .setTitle('🧪 Test Voice Log')
+                .setDescription(`<@${message.author.id}> joined <#${message.channel.id}>`)
+                .addFields(
+                    { name: '👤 User', value: message.author.displayName, inline: true },
+                    { name: '🏠 Channel', value: 'Test Channel', inline: true }
+                )
+                .setTimestamp()
+                .setFooter({ text: 'Voice Activity Logger - TEST' });
+
+            await testChannel.send({ embeds: [testEmbed] });
+            
+            message.reply(`✅ Test successful! Check ${testChannel} for test messages.`);
+        } catch (error) {
+            message.reply(`❌ Error testing channel: ${error.message}`);
+            console.error('Test log error:', error);
+        }
+    }
+
+    // Debug voice logging status
+    if (message.content === '!debuglog') {
+        if (!message.member.permissions.has(PermissionFlagsBits.ManageChannels)) {
+            return message.reply('❌ You need Manage Channels permission!');
+        }
+
+        const status = `🔍 **Voice Logging Debug Info:**
+**Enabled:** ${process.env.ENABLE_VOICE_LOGGING}
+**Channel ID:** ${process.env.VOICE_LOG_CHANNEL_ID || 'Not set'}
+**Channel Name Fallback:** ${process.env.VOICE_LOG_CHANNEL || 'voice-activity-log'}
+**Voice Tracker Active:** ${voiceTimeTracker ? 'Yes' : 'No'}
+**Active Sessions:** ${voiceTimeTracker ? voiceTimeTracker.getActiveSessionsCount() : 0}`;
+
+        message.reply(status);
+    }
+    if (message.content === '!createvoicelog') {
+        if (!message.member.permissions.has(PermissionFlagsBits.ManageChannels)) {
+            return message.reply('❌ You need Manage Channels permission to create the voice log channel!');
+        }
+
+        try {
+            const newChannel = await voiceTimeTracker.createLogChannel(message.guild);
+            if (newChannel) {
+                message.reply(`✅ Created voice log channel: ${newChannel}\n🔍 Voice activity will now be logged here!`);
+            } else {
+                message.reply('❌ Error creating voice log channel. Please check bot permissions.');
+            }
+        } catch (error) {
+            console.error('❌ Error creating voice log channel:', error);
+            message.reply('❌ Error creating voice log channel. Please check bot permissions.');
+        }
+    }
     if (message.content === '!help') {
         message.reply(`🏴‍☠️ **One Piece Voice Bot Commands**
 
