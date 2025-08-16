@@ -18,9 +18,6 @@ const DEBUG = process.env.DEBUG === 'true';
 
 // AFK Management Configuration
 const AFK_TIMEOUT = parseInt(process.env.AFK_TIMEOUT) || 900000; // 15 minutes default
-const AFK_EXCLUDED_CHANNELS = process.env.AFK_EXCLUDED_CHANNELS ? 
-    process.env.AFK_EXCLUDED_CHANNELS.split(',').map(name => name.trim()) : 
-    ['🌇〢Lofi'];
 const AUDIO_VOLUME = parseFloat(process.env.AUDIO_VOLUME) || 0.4;
 
 // PostgreSQL connection with auto-database creation
@@ -340,8 +337,15 @@ function trackAFKUser(userId, channelId, isAfk = false) {
         isAfk: false // Start as active
     });
     
-    // Set up speaking detection for this channel if not already done
-    setupSpeakingDetection(channelId);
+    // Only set up speaking detection for non-trigger channels
+    const guild = client.guilds.cache.first();
+    if (guild) {
+        const channel = guild.channels.cache.get(channelId);
+        if (channel && channel.name !== CREATE_CHANNEL_NAME) {
+            // Set up speaking detection for this channel if not the trigger channel
+            setupSpeakingDetection(channelId);
+        }
+    }
     
     if (DEBUG) {
         debugLog(`👁️ Now tracking voice activity for user ${userId} in channel ${channelId}`);
@@ -361,6 +365,12 @@ async function setupSpeakingDetection(channelId) {
         
         const channel = guild.channels.cache.get(channelId);
         if (!channel || channel.type !== ChannelType.GuildVoice) return;
+        
+        // Don't set up speaking detection for the trigger channel
+        if (channel.name === CREATE_CHANNEL_NAME) {
+            debugLog(`🚫 Skipping speaking detection for trigger channel: ${channel.name}`);
+            return;
+        }
         
         // Check if channel has any users being tracked
         const usersInChannel = Array.from(afkUsers.entries()).filter(([userId, data]) => data.channelId === channelId);
@@ -472,13 +482,6 @@ function stopTrackingAFK(userId) {
     }
 }
 
-function isChannelExcluded(channelName) {
-    return AFK_EXCLUDED_CHANNELS.some(excludedName => 
-        channelName.toLowerCase().includes(excludedName.toLowerCase()) ||
-        excludedName.toLowerCase().includes(channelName.toLowerCase())
-    );
-}
-
 async function checkAFKUsers() {
     const now = Date.now();
     const usersToDisconnect = [];
@@ -507,14 +510,7 @@ async function checkAFKUsers() {
                         continue;
                     }
                     
-                    // Check if user is in an excluded channel
-                    if (isChannelExcluded(channel.name)) {
-                        if (DEBUG) {
-                            debugLog(`🛡️ User ${member.displayName} is in protected channel: ${channel.name}`);
-                        }
-                        continue;
-                    }
-                    
+                    // All channels are now monitored equally
                     usersToDisconnect.push({ member, channel, inactiveTime });
                     log(`⚠️ User ${member.displayName} marked for AFK disconnect after ${Math.floor(inactiveTime / 60000)} minutes of inactivity`);
                 } else {
@@ -846,7 +842,11 @@ client.once('ready', async () => {
         log('🔍 Checking for existing voice channel users...');
         client.guilds.cache.forEach(guild => {
             guild.channels.cache
-                .filter(channel => channel.type === ChannelType.GuildVoice && channel.members.size > 0)
+                .filter(channel => 
+                    channel.type === ChannelType.GuildVoice && 
+                    channel.members.size > 0 &&
+                    channel.name !== CREATE_CHANNEL_NAME // Skip trigger channel
+                )
                 .forEach(channel => {
                     channel.members.forEach(member => {
                         if (!member.user.bot) {
@@ -1184,8 +1184,7 @@ client.on('messageCreate', async (message) => {
 👁️ **Users Tracked:** ${totalTracked}
 😴 **Inactive (5+ min):** ${currentlyInactive}
 ⏰ **Disconnect Timeout:** ${AFK_TIMEOUT / 60000} minutes
-🛡️ **Protected Channels:** ${AFK_EXCLUDED_CHANNELS.join(', ')}
-🎤 **Detection Method:** Voice inactivity (ignores mute/deafen)`);
+🎤 **Detection Method:** Voice inactivity (all channels monitored)`);
         } catch (error) {
             console.error('❌ Error getting AFK stats:', error);
             message.reply('❌ Error retrieving AFK stats.');
@@ -1264,7 +1263,7 @@ client.on('messageCreate', async (message) => {
 **😴 AFK Management:**
 • Users disconnected after ${AFK_TIMEOUT/60000} minutes of voice inactivity
 • Detects actual speaking activity, not just mute/deafen changes
-• Protected channels: ${AFK_EXCLUDED_CHANNELS.join(', ')}
+• All channels monitored equally (no protected channels)
 • Perfect for catching people who fall asleep in voice
 
 **🎯 Features:**
