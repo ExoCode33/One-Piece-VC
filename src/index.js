@@ -1,5 +1,8 @@
 const { Client, GatewayIntentBits, ChannelType, PermissionFlagsBits } = require('discord.js');
+const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, VoiceConnectionStatus } = require('@discordjs/voice');
 const { Pool } = require('pg');
+const fs = require('fs');
+const path = require('path');
 
 // Load environment variables
 require('dotenv').config();
@@ -122,6 +125,11 @@ const client = new Client({
 // Track user voice sessions and AFK status
 const voiceSessions = new Map(); // userId -> { sessionId, joinTime, channelId, channelName }
 const afkUsers = new Map(); // userId -> { channelId, startTime, isAfk }
+const activeConnections = new Map(); // channelId -> voice connection
+
+// Audio file paths
+const SOUNDS_DIR = path.join(__dirname, '..', 'sounds');
+const WELCOME_SOUND = path.join(SOUNDS_DIR, 'The Going Merry One Piece.ogg');
 
 // One Piece themed disconnect messages for AFK users
 const onePieceDisconnectMessages = [
@@ -443,7 +451,78 @@ async function disconnectAFKUser(member, channel, afkDuration) {
     }
 }
 
-// Function to sync channel permissions with category
+// Function to play welcome sound in a voice channel
+async function playWelcomeSound(channel) {
+    try {
+        if (!fs.existsSync(WELCOME_SOUND)) {
+            debugLog(`Welcome sound file not found: ${WELCOME_SOUND}`);
+            return;
+        }
+
+        debugLog(`🎵 Playing welcome sound in ${channel.name}`);
+
+        const connection = joinVoiceChannel({
+            channelId: channel.id,
+            guildId: channel.guild.id,
+            adapterCreator: channel.guild.voiceAdapterCreator,
+        });
+
+        activeConnections.set(channel.id, connection);
+
+        const player = createAudioPlayer();
+        const resource = createAudioResource(WELCOME_SOUND, { 
+            inlineVolume: true 
+        });
+        
+        resource.volume.setVolume(AUDIO_VOLUME);
+
+        player.play(resource);
+        connection.subscribe(player);
+
+        player.on(AudioPlayerStatus.Playing, () => {
+            debugLog(`🎵 ✅ Welcome sound playing in ${channel.name}`);
+        });
+
+        player.on(AudioPlayerStatus.Idle, () => {
+            debugLog(`🎵 Welcome sound finished in ${channel.name}`);
+            // Disconnect after sound finishes
+            setTimeout(() => {
+                if (activeConnections.has(channel.id)) {
+                    const conn = activeConnections.get(channel.id);
+                    conn.destroy();
+                    activeConnections.delete(channel.id);
+                    debugLog(`🔌 Disconnected from ${channel.name} after welcome sound`);
+                }
+            }, 2000); // Wait 2 seconds before disconnecting
+        });
+
+        player.on('error', error => {
+            console.error(`❌ Audio player error in ${channel.name}:`, error);
+            if (activeConnections.has(channel.id)) {
+                const conn = activeConnections.get(channel.id);
+                conn.destroy();
+                activeConnections.delete(channel.id);
+            }
+        });
+
+        connection.on(VoiceConnectionStatus.Ready, () => {
+            debugLog(`🔌 Voice connection ready in ${channel.name}`);
+        });
+
+        connection.on(VoiceConnectionStatus.Disconnected, () => {
+            debugLog(`🔌 Voice connection disconnected from ${channel.name}`);
+            activeConnections.delete(channel.id);
+        });
+
+        connection.on('error', error => {
+            console.error(`❌ Voice connection error in ${channel.name}:`, error);
+            activeConnections.delete(channel.id);
+        });
+
+    } catch (error) {
+        console.error(`❌ Error playing welcome sound in ${channel.name}:`, error);
+    }
+}
 async function syncChannelWithCategory(channel, category, creatorId) {
     try {
         // Get category permission overwrites
@@ -506,6 +585,16 @@ client.once('ready', async () => {
     log(`🏴‍☠️ Serving ${client.guilds.cache.size} server(s)`);
     log(`🛡️ AFK Protection: ${AFK_EXCLUDED_CHANNELS.join(', ')}`);
     log(`⏰ AFK Timeout: ${AFK_TIMEOUT / 60000} minutes`);
+    log(`🔊 Audio Volume: ${Math.round(AUDIO_VOLUME * 100)}%`);
+    
+    // Check if welcome sound exists
+    if (fs.existsSync(WELCOME_SOUND)) {
+        const stats = fs.statSync(WELCOME_SOUND);
+        log(`🎵 Welcome sound ready: ${(stats.size / 1024 / 1024).toFixed(2)} MB`);
+    } else {
+        console.warn(`⚠️ Welcome sound not found at: ${WELCOME_SOUND}`);
+        console.warn(`📁 Make sure the file exists in the sounds folder`);
+    }
     
     if (CATEGORY_ID) {
         log(`🎯 Using direct category ID: ${CATEGORY_ID}`);
@@ -659,6 +748,12 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
                 if (member.voice.channelId) {
                     await member.voice.setChannel(newChannel);
                     debugLog(`✅ Successfully moved ${member.displayName} to ${crewName}`);
+                    
+                    // Play welcome sound after moving user
+                    setTimeout(() => {
+                        playWelcomeSound(newChannel);
+                    }, 1000); // Wait 1 second for user to fully connect
+                    
                 } else {
                     debugLog(`User ${member.displayName} disconnected before move, cleaning up channel`);
                     setTimeout(async () => {
@@ -699,6 +794,14 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
                 oldChannel.members.size === 0) {
                 
                 debugLog(`🕐 Scheduling deletion of empty crew: ${oldChannel.name} in ${DELETE_DELAY}ms`);
+                
+                // Clean up any voice connection for this channel
+                if (activeConnections.has(oldChannel.id)) {
+                    const connection = activeConnections.get(oldChannel.id);
+                    connection.destroy();
+                    activeConnections.delete(oldChannel.id);
+                    debugLog(`🔌 Cleaned up voice connection for ${oldChannel.name}`);
+                }
                 
                 setTimeout(async () => {
                     try {
@@ -790,9 +893,10 @@ client.on('messageCreate', async (message) => {
 ⚓ **Servers:** ${client.guilds.cache.size}
 👤 **Active Voice Sessions:** ${voiceSessions.size}
 😴 **AFK Users Tracked:** ${afkUsers.size}
+🎵 **Active Audio Connections:** ${activeConnections.size}
 ⏰ **Uptime:** ${hours}h ${minutes}m
 🗄️ **Database:** Connected
-🎤 **Features:** Dynamic Voice Channels, Voice Time Tracking, AFK Management`);
+🎤 **Features:** Dynamic Voice Channels, Voice Time Tracking, AFK Management, Welcome Sounds`);
     }
     
     // AFK stats command
@@ -876,6 +980,18 @@ async function gracefulShutdown() {
             await endVoiceSession(userId);
         }
         
+        // Clean up voice connections
+        log(`🔌 Cleaning up ${activeConnections.size} voice connections...`);
+        activeConnections.forEach((connection, channelId) => {
+            try {
+                connection.destroy();
+                debugLog(`🔌 Destroyed connection for channel ${channelId}`);
+            } catch (error) {
+                console.error(`❌ Error destroying connection ${channelId}:`, error);
+            }
+        });
+        activeConnections.clear();
+        
         // Clear AFK tracking
         log(`😴 Clearing ${afkUsers.size} AFK tracking sessions...`);
         afkUsers.clear();
@@ -900,7 +1016,7 @@ async function gracefulShutdown() {
 // Keep the process alive and log status
 setInterval(() => {
     if (DEBUG) {
-        console.log(`🏴‍☠️ Bot Status - Guilds: ${client.guilds.cache.size}, Active Voice Sessions: ${voiceSessions.size}, AFK Tracked: ${afkUsers.size}, Uptime: ${Math.floor(process.uptime()/60)}m`);
+        console.log(`🏴‍☠️ Bot Status - Guilds: ${client.guilds.cache.size}, Active Voice Sessions: ${voiceSessions.size}, AFK Tracked: ${afkUsers.size}, Audio Connections: ${activeConnections.size}, Uptime: ${Math.floor(process.uptime()/60)}m`);
     }
 }, 300000); // Log every 5 minutes in debug mode
 
