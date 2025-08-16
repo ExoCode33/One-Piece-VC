@@ -16,7 +16,9 @@
     "discord.js": "^14.16.3",
     "dotenv": "^16.4.5",
     "pg": "^8.11.3",
-    "@discordjs/voice": "^0.17.0"
+    "@discordjs/voice": "^0.17.0",
+    "libsodium-wrappers": "^0.7.13",
+    "opusscript": "^0.0.8"
   },
   "engines": {
     "node": ">=18.0.0"
