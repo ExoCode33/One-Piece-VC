@@ -4,44 +4,85 @@ const { EmbedBuilder } = require('discord.js');
 class ChannelLogger {
     constructor(client) {
         this.client = client;
+        this.logChannelId = process.env.VOICE_LOG_CHANNEL_ID;
         this.logChannelName = process.env.VOICE_LOG_CHANNEL || 'voice-activity-log';
         this.enableLogging = process.env.ENABLE_VOICE_LOGGING === 'true';
         
         if (this.enableLogging) {
-            console.log(`🔍 Channel Logger initialized - Target channel: ${this.logChannelName}`);
+            if (this.logChannelId) {
+                console.log(`🔍 Channel Logger initialized - Target channel ID: ${this.logChannelId}`);
+            } else {
+                console.log(`🔍 Channel Logger initialized - Target channel name: ${this.logChannelName}`);
+            }
         } else {
             console.log(`⚠️ Channel logging disabled. Set ENABLE_VOICE_LOGGING=true to enable.`);
         }
     }
 
     async logVoiceEvent(guildId, userId, username, channelId, channelName, action, additionalInfo = {}) {
-        if (!this.enableLogging) return;
+        if (!this.enableLogging) {
+            console.log(`🔇 Voice logging disabled, skipping ${action} event for ${username}`);
+            return;
+        }
+        
+        console.log(`🔍 Attempting to log ${action} event for ${username} in ${channelName}`);
         
         try {
             const guild = this.client.guilds.cache.get(guildId);
-            if (!guild) return;
-
-            // Find the log channel
-            const logChannel = guild.channels.cache.find(channel => 
-                channel.name === this.logChannelName && channel.type === 0 // Text channel
-            );
-
-            if (!logChannel) {
-                // Only warn once per guild to avoid spam
-                if (!this.missingChannelWarned) {
-                    console.warn(`⚠️ Voice log channel "${this.logChannelName}" not found in ${guild.name}`);
-                    console.warn(`💡 Create channel with: !createvoicelog`);
-                    this.missingChannelWarned = true;
-                }
+            if (!guild) {
+                console.warn(`❌ Guild ${guildId} not found`);
                 return;
+            }
+
+            let logChannel;
+            
+            // Try to find by ID first (preferred method)
+            if (this.logChannelId) {
+                console.log(`🔍 Looking for channel with ID: ${this.logChannelId}`);
+                logChannel = guild.channels.cache.get(this.logChannelId);
+                if (!logChannel) {
+                    console.warn(`⚠️ Voice log channel with ID "${this.logChannelId}" not found in ${guild.name}`);
+                    console.warn(`💡 Check if the channel ID is correct: ${this.logChannelId}`);
+                    
+                    // List all channels for debugging
+                    console.log(`📋 Available channels in ${guild.name}:`);
+                    guild.channels.cache.forEach(ch => {
+                        console.log(`  - ${ch.name} (${ch.type === 0 ? 'TEXT' : 'OTHER'}) - ID: ${ch.id}`);
+                    });
+                    return;
+                } else {
+                    console.log(`✅ Found log channel: ${logChannel.name} (ID: ${logChannel.id})`);
+                }
+            } else {
+                // Fallback to finding by name
+                console.log(`🔍 Looking for channel with name: ${this.logChannelName}`);
+                logChannel = guild.channels.cache.find(channel => 
+                    channel.name === this.logChannelName && channel.type === 0 // Text channel
+                );
+
+                if (!logChannel) {
+                    // Only warn once per guild to avoid spam
+                    if (!this.missingChannelWarned) {
+                        console.warn(`⚠️ Voice log channel "${this.logChannelName}" not found in ${guild.name}`);
+                        console.warn(`💡 Set VOICE_LOG_CHANNEL_ID=your_channel_id or create channel with: !createvoicelog`);
+                        this.missingChannelWarned = true;
+                    }
+                    return;
+                } else {
+                    console.log(`✅ Found log channel by name: ${logChannel.name} (ID: ${logChannel.id})`);
+                }
             }
 
             // Create embed based on action
             const embed = this.createLogEmbed(userId, username, channelId, channelName, action, additionalInfo);
             
+            console.log(`📤 Sending ${action} embed to ${logChannel.name}...`);
             await logChannel.send({ embeds: [embed] });
+            console.log(`✅ Successfully sent ${action} log for ${username}`);
+            
         } catch (error) {
             console.error('❌ Error sending log message:', error);
+            console.error('Full error details:', error.stack);
         }
     }
 
@@ -121,12 +162,24 @@ class ChannelLogger {
     // Method to create log channel
     async createLogChannel(guild) {
         try {
-            // Check if channel already exists
+            // If using channel ID, check if it exists
+            if (this.logChannelId) {
+                const existingChannel = guild.channels.cache.get(this.logChannelId);
+                if (existingChannel) {
+                    return existingChannel;
+                } else {
+                    console.warn(`⚠️ Channel ID ${this.logChannelId} not found, creating new channel with name: ${this.logChannelName}`);
+                }
+            }
+
+            // Check if channel with name already exists
             const existingChannel = guild.channels.cache.find(channel => 
                 channel.name === this.logChannelName && channel.type === 0
             );
 
             if (existingChannel) {
+                console.log(`💡 Found existing channel: ${existingChannel.name} (ID: ${existingChannel.id})`);
+                console.log(`💡 To use this channel, set VOICE_LOG_CHANNEL_ID=${existingChannel.id} in your .env`);
                 return existingChannel;
             }
 
@@ -143,7 +196,8 @@ class ChannelLogger {
                 ]
             });
 
-            console.log(`✅ Created voice log channel: ${newChannel.name} in ${guild.name}`);
+            console.log(`✅ Created voice log channel: ${newChannel.name} (ID: ${newChannel.id}) in ${guild.name}`);
+            console.log(`💡 To use this channel permanently, set VOICE_LOG_CHANNEL_ID=${newChannel.id} in your .env`);
             return newChannel;
         } catch (error) {
             console.error('❌ Error creating voice log channel:', error);
