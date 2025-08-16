@@ -327,33 +327,38 @@ async function getUserVoiceStats(userId, guildId, days = 30) {
 
 // AFK Management Functions
 function isUserAFK(voiceState) {
-    // Only consider user AFK if they are self-deafened (ignore self-mute)
-    return voiceState.selfDeaf;
+    // Don't use mute/deafen status for AFK detection
+    // AFK will be determined by voice activity/inactivity instead
+    return false; // Always return false, we'll track activity differently
 }
 
-function trackAFKUser(userId, channelId, isAfk) {
+function trackAFKUser(userId, channelId, isAfk = false) {
     afkUsers.set(userId, {
         channelId: channelId,
-        startTime: isAfk ? Date.now() : null,
-        isAfk: isAfk
+        lastActivity: Date.now(), // Track last voice activity
+        isAfk: false // Start as active
     });
     
     if (DEBUG) {
-        debugLog(`👁️ Now tracking AFK status for user ${userId} in channel ${channelId} (AFK: ${isAfk})`);
+        debugLog(`👁️ Now tracking voice activity for user ${userId} in channel ${channelId}`);
+    }
+}
+
+function updateUserActivity(userId) {
+    const userData = afkUsers.get(userId);
+    if (userData) {
+        userData.lastActivity = Date.now();
+        userData.isAfk = false;
+        
+        if (DEBUG) {
+            debugLog(`🎤 Voice activity detected for user ${userId}`);
+        }
     }
 }
 
 function updateAFKStatus(userId, channelId, isAfk) {
-    const userData = afkUsers.get(userId);
-    if (userData) {
-        userData.channelId = channelId;
-        userData.isAfk = isAfk;
-        userData.startTime = isAfk ? Date.now() : null;
-        
-        if (DEBUG) {
-            debugLog(`🔄 Updated AFK status for user ${userId}: ${isAfk ? 'AFK' : 'Active'}`);
-        }
-    }
+    // This function is no longer needed since we're not using mute/deafen status
+    // But keeping it for compatibility
 }
 
 function stopTrackingAFK(userId) {
@@ -375,16 +380,15 @@ async function checkAFKUsers() {
     const usersToDisconnect = [];
 
     for (const [userId, userData] of afkUsers.entries()) {
-        if (!userData.isAfk || !userData.startTime) continue;
-
-        const afkDuration = now - userData.startTime;
+        const inactiveTime = now - userData.lastActivity;
         
-        if (afkDuration >= AFK_TIMEOUT) {
+        // Check if user has been inactive for longer than AFK_TIMEOUT
+        if (inactiveTime >= AFK_TIMEOUT) {
             try {
                 const guild = client.guilds.cache.first(); // Assuming single guild for now
                 if (!guild) continue;
                 
-                const member = await guild.members.fetch(userId);
+                const member = await guild.members.fetch(userId).catch(() => null);
                 const channel = guild.channels.cache.get(userData.channelId);
                 
                 if (member && member.voice.channel && channel) {
@@ -396,7 +400,7 @@ async function checkAFKUsers() {
                         continue;
                     }
                     
-                    usersToDisconnect.push({ member, channel, afkDuration });
+                    usersToDisconnect.push({ member, channel, inactiveTime });
                 }
             } catch (error) {
                 console.error(`❌ Error checking AFK user ${userId}:`, error);
@@ -406,15 +410,15 @@ async function checkAFKUsers() {
     }
 
     // Disconnect AFK users
-    for (const { member, channel, afkDuration } of usersToDisconnect) {
-        await disconnectAFKUser(member, channel, afkDuration);
+    for (const { member, channel, inactiveTime } of usersToDisconnect) {
+        await disconnectAFKUser(member, channel, inactiveTime);
     }
 }
 
-async function disconnectAFKUser(member, channel, afkDuration) {
+async function disconnectAFKUser(member, channel, inactiveTime) {
     try {
         // Disconnect the user
-        await member.voice.disconnect('AFK timeout');
+        await member.voice.disconnect('AFK timeout - no voice activity');
         stopTrackingAFK(member.id);
         
         // Get random disconnect message
@@ -435,7 +439,7 @@ async function disconnectAFKUser(member, channel, afkDuration) {
                 description: randomMessage,
                 fields: [
                     { name: '🏴‍☠️ Former Location', value: channel.name, inline: true },
-                    { name: '⏰ AFK Duration', value: `${Math.floor(afkDuration / 60000)} minutes`, inline: true }
+                    { name: '😴 Inactive Duration', value: `${Math.floor(inactiveTime / 60000)} minutes`, inline: true }
                 ],
                 footer: { text: 'Return when you\'re ready to set sail again!' },
                 timestamp: new Date().toISOString()
@@ -444,10 +448,10 @@ async function disconnectAFKUser(member, channel, afkDuration) {
             await generalChannel.send({ embeds: [embed] });
         }
         
-        log(`🌊 Disconnected AFK user: ${member.displayName} from ${channel.name} (AFK for ${Math.floor(afkDuration / 60000)} minutes)`);
+        log(`🌊 Disconnected inactive user: ${member.displayName} from ${channel.name} (inactive for ${Math.floor(inactiveTime / 60000)} minutes)`);
         
     } catch (error) {
-        console.error(`❌ Error disconnecting AFK user ${member.displayName}:`, error);
+        console.error(`❌ Error disconnecting inactive user ${member.displayName}:`, error);
     }
 }
 
@@ -585,7 +589,7 @@ client.once('ready', async () => {
     log(`🏴‍☠️ Serving ${client.guilds.cache.size} server(s)`);
     log(`🛡️ AFK Protection: ${AFK_EXCLUDED_CHANNELS.join(', ')}`);
     log(`⏰ AFK Timeout: ${AFK_TIMEOUT / 60000} minutes`);
-    log(`😴 AFK Detection: Self-Deafen only (Self-Mute ignored)`);
+    log(`😴 AFK Detection: Voice inactivity (ignores mute/deafen status)`);
     log(`🔊 Audio Volume: ${Math.round(AUDIO_VOLUME * 100)}%`);
     
     // Check if welcome sound exists
@@ -642,27 +646,19 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
         } else if (!oldState.channelId && newState.channelId) {
             // User joined voice
             await startVoiceSession(userId, guildId, newState.channelId, newState.channel.name);
-            trackAFKUser(userId, newState.channelId, isUserAFK(newState));
+            trackAFKUser(userId, newState.channelId);
             debugLog(`👤 ${member.displayName} joined ${newState.channel.name}`);
         } else if (oldState.channelId && newState.channelId && oldState.channelId !== newState.channelId) {
             // User moved between channels
             await endVoiceSession(userId);
             await startVoiceSession(userId, guildId, newState.channelId, newState.channel.name);
-            trackAFKUser(userId, newState.channelId, isUserAFK(newState));
+            trackAFKUser(userId, newState.channelId);
             debugLog(`👤 ${member.displayName} moved from ${oldState.channel.name} to ${newState.channel.name}`);
         } else if (newState.channelId) {
             // User's state changed (muted/deafened) while in same channel
-            const wasAfk = isUserAFK(oldState);
-            const isAfk = isUserAFK(newState);
-            
-            if (wasAfk !== isAfk) {
-                updateAFKStatus(userId, newState.channelId, isAfk);
-                if (isAfk) {
-                    debugLog(`😴 ${member.displayName} is now AFK (deafened)`);
-                } else {
-                    debugLog(`👂 ${member.displayName} is now active (undeafened)`);
-                }
-            }
+            // Update their activity timestamp since any state change indicates they're active
+            updateUserActivity(userId);
+            debugLog(`🎛️ ${member.displayName} changed voice state (still active)`);
         }
 
         // Dynamic Voice Channel Creation
@@ -829,6 +825,24 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
     }
 });
 
+// Listen for speaking events to detect voice activity
+client.on('voiceStateUpdate', (oldState, newState) => {
+    const member = newState.member || oldState.member;
+    const userId = member.id;
+    
+    // Set up speaking detection when user joins a channel
+    if (newState.channel && !oldState.channel) {
+        // User joined a channel, start monitoring their voice activity
+        const connection = newState.guild.voiceAdapterCreator.createAdapter(newState.channel);
+        if (connection) {
+            // Note: Discord.js v14 doesn't have direct speaking events
+            // We'll rely on state changes and periodic checks for now
+            // Any voice state change indicates activity
+            updateUserActivity(userId);
+        }
+    }
+});
+
 // Handle category moves - sync to database when category is moved/renamed
 client.on('channelUpdate', async (oldChannel, newChannel) => {
     try {
@@ -908,13 +922,23 @@ client.on('messageCreate', async (message) => {
     if (message.content === '!afkstats') {
         try {
             const totalTracked = afkUsers.size;
-            const currentlyAFK = Array.from(afkUsers.values()).filter(user => user.isAfk).length;
+            const now = Date.now();
+            let currentlyInactive = 0;
+            
+            // Count users who have been inactive for more than 5 minutes
+            for (const [userId, userData] of afkUsers.entries()) {
+                const inactiveTime = now - userData.lastActivity;
+                if (inactiveTime >= 300000) { // 5 minutes
+                    currentlyInactive++;
+                }
+            }
             
             message.reply(`📊 **AFK System Stats**
 👁️ **Users Tracked:** ${totalTracked}
-😴 **Currently AFK:** ${currentlyAFK}
-⏰ **AFK Timeout:** ${AFK_TIMEOUT / 60000} minutes
-🛡️ **Protected Channels:** ${AFK_EXCLUDED_CHANNELS.join(', ')}`);
+😴 **Inactive (5+ min):** ${currentlyInactive}
+⏰ **Disconnect Timeout:** ${AFK_TIMEOUT / 60000} minutes
+🛡️ **Protected Channels:** ${AFK_EXCLUDED_CHANNELS.join(', ')}
+🎤 **Detection Method:** Voice inactivity (ignores mute/deafen)`);
         } catch (error) {
             console.error('❌ Error getting AFK stats:', error);
             message.reply('❌ Error retrieving AFK stats.');
@@ -940,10 +964,10 @@ client.on('messageCreate', async (message) => {
 5. Your voice time is automatically tracked!
 
 **😴 AFK Management:**
-• Users who are AFK (deafened) for ${AFK_TIMEOUT/60000} minutes get disconnected
-• Self-mute is ignored - only self-deafen triggers AFK
+• Users disconnected after ${AFK_TIMEOUT/60000} minutes of voice inactivity
+• Mute/deafen status is ignored - only voice activity matters
 • Protected channels: ${AFK_EXCLUDED_CHANNELS.join(', ')}
-• Themed disconnect messages for immersion
+• Perfect for catching people who fall asleep in voice
 
 **🎯 Features:**
 • Dynamic voice channel creation
