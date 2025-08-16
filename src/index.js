@@ -480,9 +480,26 @@ async function playWelcomeSound(channel) {
             
             try {
                 const player = createAudioPlayer();
-                const resource = createAudioResource(WELCOME_SOUND, { 
-                    inlineVolume: true 
-                });
+                
+                // Try to create audio resource with different options for better compatibility
+                let resource;
+                try {
+                    resource = createAudioResource(WELCOME_SOUND, { 
+                        inlineVolume: true,
+                        inputType: 'arbitrary'
+                    });
+                } catch (ffmpegError) {
+                    console.warn(`⚠️ FFmpeg issue, trying alternative method:`, ffmpegError.message);
+                    try {
+                        // Try without inline volume if FFmpeg fails
+                        resource = createAudioResource(WELCOME_SOUND);
+                    } catch (fallbackError) {
+                        console.error(`❌ All audio resource creation methods failed:`, fallbackError);
+                        connection.destroy();
+                        activeConnections.delete(channel.id);
+                        return;
+                    }
+                }
                 
                 if (resource.volume) {
                     resource.volume.setVolume(AUDIO_VOLUME);
@@ -521,6 +538,7 @@ async function playWelcomeSound(channel) {
                 
             } catch (audioError) {
                 console.error(`❌ Error creating audio player:`, audioError);
+                log(`💡 This might be due to missing FFmpeg. Audio features will be skipped.`);
                 connection.destroy();
                 activeConnections.delete(channel.id);
             }
@@ -629,6 +647,25 @@ client.once('ready', async () => {
     } else {
         console.warn(`⚠️ Welcome sound not found at: ${WELCOME_SOUND}`);
         console.warn(`📁 Make sure the file exists in the sounds folder`);
+    }
+    
+    // Check for FFmpeg availability
+    try {
+        const { spawn } = require('child_process');
+        const ffmpeg = spawn('ffmpeg', ['-version']);
+        ffmpeg.on('close', (code) => {
+            if (code === 0) {
+                log(`🔧 FFmpeg is available - audio features enabled`);
+            } else {
+                console.warn(`⚠️ FFmpeg check failed with code ${code}`);
+            }
+        });
+        ffmpeg.on('error', (error) => {
+            console.warn(`⚠️ FFmpeg not found - audio features may not work`);
+            console.warn(`💡 This is expected on some hosting platforms`);
+        });
+    } catch (error) {
+        console.warn(`⚠️ Could not check FFmpeg availability`);
     }
     
     if (CATEGORY_ID) {
