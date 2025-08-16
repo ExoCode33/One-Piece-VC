@@ -351,7 +351,7 @@ function updateUserActivity(userId) {
         userData.isAfk = false;
         
         if (DEBUG) {
-            debugLog(`🎤 Voice activity detected for user ${userId}`);
+            debugLog(`🎤 Voice activity detected for user ${userId} - activity timestamp updated`);
         }
     }
 }
@@ -382,16 +382,27 @@ async function checkAFKUsers() {
     for (const [userId, userData] of afkUsers.entries()) {
         const inactiveTime = now - userData.lastActivity;
         
+        if (DEBUG && inactiveTime > 600000) { // Log if user has been inactive for more than 10 minutes
+            debugLog(`😴 User ${userId} inactive for ${Math.floor(inactiveTime / 60000)} minutes`);
+        }
+        
         // Check if user has been inactive for longer than AFK_TIMEOUT
         if (inactiveTime >= AFK_TIMEOUT) {
             try {
-                const guild = client.guilds.cache.first(); // Assuming single guild for now
+                const guild = client.guilds.cache.first();
                 if (!guild) continue;
                 
                 const member = await guild.members.fetch(userId).catch(() => null);
                 const channel = guild.channels.cache.get(userData.channelId);
                 
                 if (member && member.voice.channel && channel) {
+                    // Double-check they're still in the same channel
+                    if (member.voice.channel.id !== userData.channelId) {
+                        // User moved channels, update their tracking
+                        trackAFKUser(userId, member.voice.channel.id);
+                        continue;
+                    }
+                    
                     // Check if user is in an excluded channel
                     if (isChannelExcluded(channel.name)) {
                         if (DEBUG) {
@@ -401,6 +412,10 @@ async function checkAFKUsers() {
                     }
                     
                     usersToDisconnect.push({ member, channel, inactiveTime });
+                    log(`⚠️ User ${member.displayName} marked for AFK disconnect after ${Math.floor(inactiveTime / 60000)} minutes of inactivity`);
+                } else {
+                    // User is no longer in voice, remove from tracking
+                    stopTrackingAFK(userId);
                 }
             } catch (error) {
                 console.error(`❌ Error checking AFK user ${userId}:`, error);
@@ -721,11 +736,11 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
             await startVoiceSession(userId, guildId, newState.channelId, newState.channel.name);
             trackAFKUser(userId, newState.channelId);
             debugLog(`👤 ${member.displayName} moved from ${oldState.channel.name} to ${newState.channel.name}`);
-        } else if (newState.channelId) {
+        } else if (newState.channelId && oldState.channelId === newState.channelId) {
             // User's state changed (muted/deafened) while in same channel
-            // Update their activity timestamp since any state change indicates they're active
+            // This is important - any state change means they're active!
             updateUserActivity(userId);
-            debugLog(`🎛️ ${member.displayName} changed voice state (still active)`);
+            debugLog(`🎛️ ${member.displayName} changed voice state - marked as active`);
         }
 
         // Dynamic Voice Channel Creation
@@ -996,7 +1011,35 @@ client.on('messageCreate', async (message) => {
         }
     }
     
-    // Debug sound test command
+    // Emergency AFK disable (admin only)
+    if (message.content === '!disableafk' && message.member.permissions.has(PermissionFlagsBits.Administrator)) {
+        // Clear all AFK tracking
+        afkUsers.clear();
+        message.reply('🛑 **AFK system temporarily disabled!** All tracking cleared. Restart bot to re-enable.');
+    }
+    
+    // Force reset user's AFK timer
+    if (message.content === '!resetafk') {
+        updateUserActivity(message.author.id);
+        message.reply('✅ Your AFK timer has been reset!');
+    }
+    if (message.content === '!myafk') {
+        const userData = afkUsers.get(message.author.id);
+        if (userData) {
+            const now = Date.now();
+            const inactiveTime = now - userData.lastActivity;
+            const inactiveMinutes = Math.floor(inactiveTime / 60000);
+            const timeUntilKick = Math.max(0, Math.floor((AFK_TIMEOUT - inactiveTime) / 60000));
+            
+            message.reply(`📊 **Your AFK Status:**
+⏰ **Inactive for:** ${inactiveMinutes} minutes
+⏳ **Time until kick:** ${timeUntilKick} minutes
+📍 **Channel:** <#${userData.channelId}>
+💡 **Any voice action resets your timer!**`);
+        } else {
+            message.reply('❌ You\'re not in a voice channel or not being tracked.');
+        }
+    }
     if (message.content === '!testsound') {
         if (!message.member.voice.channel) {
             return message.reply('❌ You need to be in a voice channel to test the sound!');
