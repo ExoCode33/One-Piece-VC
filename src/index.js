@@ -327,8 +327,8 @@ async function getUserVoiceStats(userId, guildId, days = 30) {
 
 // AFK Management Functions
 function isUserAFK(voiceState) {
-    // Consider user AFK if they are self-deafened or self-muted
-    return voiceState.selfDeaf || voiceState.selfMute;
+    // Only consider user AFK if they are self-deafened (ignore self-mute)
+    return voiceState.selfDeaf;
 }
 
 function trackAFKUser(userId, channelId, isAfk) {
@@ -585,6 +585,7 @@ client.once('ready', async () => {
     log(`🏴‍☠️ Serving ${client.guilds.cache.size} server(s)`);
     log(`🛡️ AFK Protection: ${AFK_EXCLUDED_CHANNELS.join(', ')}`);
     log(`⏰ AFK Timeout: ${AFK_TIMEOUT / 60000} minutes`);
+    log(`😴 AFK Detection: Self-Deafen only (Self-Mute ignored)`);
     log(`🔊 Audio Volume: ${Math.round(AUDIO_VOLUME * 100)}%`);
     
     // Check if welcome sound exists
@@ -656,7 +657,11 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
             
             if (wasAfk !== isAfk) {
                 updateAFKStatus(userId, newState.channelId, isAfk);
-                debugLog(`🔄 AFK status changed for ${member.displayName}: ${isAfk ? 'AFK' : 'Active'}`);
+                if (isAfk) {
+                    debugLog(`😴 ${member.displayName} is now AFK (deafened)`);
+                } else {
+                    debugLog(`👂 ${member.displayName} is now active (undeafened)`);
+                }
             }
         }
 
@@ -935,7 +940,8 @@ client.on('messageCreate', async (message) => {
 5. Your voice time is automatically tracked!
 
 **😴 AFK Management:**
-• Users who are AFK (muted/deafened) for ${AFK_TIMEOUT/60000} minutes get disconnected
+• Users who are AFK (deafened) for ${AFK_TIMEOUT/60000} minutes get disconnected
+• Self-mute is ignored - only self-deafen triggers AFK
 • Protected channels: ${AFK_EXCLUDED_CHANNELS.join(', ')}
 • Themed disconnect messages for immersion
 
