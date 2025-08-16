@@ -585,18 +585,26 @@ async function playWelcomeSound(channel) {
 
         log(`🎵 Attempting to join ${channel.name} to play welcome sound...`);
 
-        const connection = joinVoiceChannel({
-            channelId: channel.id,
-            guildId: channel.guild.id,
-            adapterCreator: channel.guild.voiceAdapterCreator,
-        });
+        // Check if we already have a speaking detection connection for this channel
+        const speakingConnectionKey = `speaking_${channel.id}`;
+        let connection;
+        
+        if (activeConnections.has(speakingConnectionKey)) {
+            // Use existing speaking detection connection
+            connection = activeConnections.get(speakingConnectionKey);
+            log(`🔄 Using existing speaking detection connection for ${channel.name}`);
+        } else {
+            // Create new connection for welcome sound
+            connection = joinVoiceChannel({
+                channelId: channel.id,
+                guildId: channel.guild.id,
+                adapterCreator: channel.guild.voiceAdapterCreator,
+            });
+            activeConnections.set(`welcome_${channel.id}`, connection);
+            log(`🔌 Voice connection created for welcome sound in ${channel.name}`);
+        }
 
-        activeConnections.set(channel.id, connection);
-        log(`🔌 Voice connection created for ${channel.name}`);
-
-        connection.on(VoiceConnectionStatus.Ready, () => {
-            log(`✅ Voice connection ready in ${channel.name}, starting audio...`);
-            
+        const playAudio = () => {
             try {
                 const player = createAudioPlayer();
                 
@@ -614,8 +622,11 @@ async function playWelcomeSound(channel) {
                         resource = createAudioResource(WELCOME_SOUND);
                     } catch (fallbackError) {
                         console.error(`❌ All audio resource creation methods failed:`, fallbackError);
-                        connection.destroy();
-                        activeConnections.delete(channel.id);
+                        if (activeConnections.has(`welcome_${channel.id}`)) {
+                            const conn = activeConnections.get(`welcome_${channel.id}`);
+                            conn.destroy();
+                            activeConnections.delete(`welcome_${channel.id}`);
+                        }
                         return;
                     }
                 }
@@ -635,62 +646,79 @@ async function playWelcomeSound(channel) {
 
                 player.on(AudioPlayerStatus.Idle, () => {
                     log(`🎵 Welcome sound finished in ${channel.name}`);
-                    // Disconnect after sound finishes
-                    setTimeout(() => {
-                        if (activeConnections.has(channel.id)) {
-                            const conn = activeConnections.get(channel.id);
-                            conn.destroy();
-                            activeConnections.delete(channel.id);
-                            log(`🔌 Disconnected from ${channel.name} after welcome sound`);
-                        }
-                    }, 2000);
+                    // Only disconnect if this was a dedicated welcome connection
+                    if (activeConnections.has(`welcome_${channel.id}`)) {
+                        setTimeout(() => {
+                            const conn = activeConnections.get(`welcome_${channel.id}`);
+                            if (conn) {
+                                conn.destroy();
+                                activeConnections.delete(`welcome_${channel.id}`);
+                                log(`🔌 Disconnected welcome connection from ${channel.name}`);
+                            }
+                        }, 2000);
+                    }
                 });
 
                 player.on('error', error => {
                     console.error(`❌ Audio player error in ${channel.name}:`, error);
-                    if (activeConnections.has(channel.id)) {
-                        const conn = activeConnections.get(channel.id);
+                    if (activeConnections.has(`welcome_${channel.id}`)) {
+                        const conn = activeConnections.get(`welcome_${channel.id}`);
                         conn.destroy();
-                        activeConnections.delete(channel.id);
+                        activeConnections.delete(`welcome_${channel.id}`);
                     }
                 });
                 
             } catch (audioError) {
                 console.error(`❌ Error creating audio player:`, audioError);
                 log(`💡 This might be due to missing FFmpeg. Audio features will be skipped.`);
-                connection.destroy();
-                activeConnections.delete(channel.id);
+                if (activeConnections.has(`welcome_${channel.id}`)) {
+                    connection.destroy();
+                    activeConnections.delete(`welcome_${channel.id}`);
+                }
             }
-        });
+        };
+
+        if (connection.state.status === VoiceConnectionStatus.Ready) {
+            // Connection is ready, play audio immediately
+            playAudio();
+        } else {
+            // Wait for connection to be ready
+            connection.on(VoiceConnectionStatus.Ready, () => {
+                log(`✅ Welcome sound connection ready in ${channel.name}, starting audio...`);
+                playAudio();
+            });
+        }
 
         connection.on(VoiceConnectionStatus.Disconnected, () => {
-            log(`🔌 Voice connection disconnected from ${channel.name}`);
-            activeConnections.delete(channel.id);
+            log(`🔌 Welcome sound connection disconnected from ${channel.name}`);
+            activeConnections.delete(`welcome_${channel.id}`);
         });
 
         connection.on('error', error => {
-            console.error(`❌ Voice connection error in ${channel.name}:`, error);
-            activeConnections.delete(channel.id);
+            console.error(`❌ Welcome sound connection error in ${channel.name}:`, error);
+            activeConnections.delete(`welcome_${channel.id}`);
         });
 
         // Add timeout in case connection fails
         setTimeout(() => {
-            if (activeConnections.has(channel.id)) {
-                const conn = activeConnections.get(channel.id);
+            const welcomeKey = `welcome_${channel.id}`;
+            if (activeConnections.has(welcomeKey)) {
+                const conn = activeConnections.get(welcomeKey);
                 if (conn.state.status !== VoiceConnectionStatus.Ready) {
-                    log(`⚠️ Connection timeout for ${channel.name}, destroying...`);
+                    log(`⚠️ Welcome sound connection timeout for ${channel.name}, destroying...`);
                     conn.destroy();
-                    activeConnections.delete(channel.id);
+                    activeConnections.delete(welcomeKey);
                 }
             }
         }, 10000); // 10 second timeout
 
     } catch (error) {
         console.error(`❌ Error in playWelcomeSound for ${channel.name}:`, error);
-        if (activeConnections.has(channel.id)) {
-            const conn = activeConnections.get(channel.id);
+        const welcomeKey = `welcome_${channel.id}`;
+        if (activeConnections.has(welcomeKey)) {
+            const conn = activeConnections.get(welcomeKey);
             conn.destroy();
-            activeConnections.delete(channel.id);
+            activeConnections.delete(welcomeKey);
         }
     }
 }
@@ -813,6 +841,28 @@ client.once('ready', async () => {
         
         // Clean up unused speaking detection every 5 minutes
         setInterval(cleanupUnusedSpeakingDetection, 300000);
+        
+        // Set up speaking detection for existing voice channel users
+        log('🔍 Checking for existing voice channel users...');
+        client.guilds.cache.forEach(guild => {
+            guild.channels.cache
+                .filter(channel => channel.type === ChannelType.GuildVoice && channel.members.size > 0)
+                .forEach(channel => {
+                    channel.members.forEach(member => {
+                        if (!member.user.bot) {
+                            const userId = member.id;
+                            const guildId = guild.id;
+                            const channelId = channel.id;
+                            
+                            // Start tracking existing users
+                            startVoiceSession(userId, guildId, channelId, channel.name);
+                            trackAFKUser(userId, channelId);
+                            
+                            log(`🔄 Now tracking existing user: ${member.displayName} in ${channel.name}`);
+                        }
+                    });
+                });
+        });
         
     } catch (error) {
         console.error('❌ Database initialization failed:', error);
@@ -1007,12 +1057,13 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
                 
                 debugLog(`🕐 Scheduling deletion of empty crew: ${oldChannel.name} in ${DELETE_DELAY}ms`);
                 
-                // Clean up any voice connection for this channel
-                if (activeConnections.has(oldChannel.id)) {
-                    const connection = activeConnections.get(oldChannel.id);
+                // Clean up any voice connections for this channel
+                const welcomeKey = `welcome_${oldChannel.id}`;
+                if (activeConnections.has(welcomeKey)) {
+                    const connection = activeConnections.get(welcomeKey);
                     connection.destroy();
-                    activeConnections.delete(oldChannel.id);
-                    debugLog(`🔌 Cleaned up voice connection for ${oldChannel.name}`);
+                    activeConnections.delete(welcomeKey);
+                    debugLog(`🔌 Cleaned up welcome connection for ${oldChannel.name}`);
                 }
                 
                 // Clean up speaking detection
