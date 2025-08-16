@@ -26,53 +26,43 @@ let pool;
 let voiceTimeTracker;
 
 async function initializeConnection() {
-    const databaseUrl = process.env.DATABASE_URL;
-    
-    if (!databaseUrl) {
-        throw new Error('DATABASE_URL environment variable is required');
-    }
-    
-    // Parse the database URL to get connection details
-    const url = new URL(databaseUrl);
-    const dbName = url.pathname.slice(1); // Remove leading slash
-    
-    // Create connection without database name first (to create database if needed)
-    const adminUrl = new URL(databaseUrl);
-    adminUrl.pathname = '/postgres'; // Connect to default postgres database
-    
-    const adminPool = new Pool({
-        connectionString: adminUrl.toString(),
-        ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
-    });
-    
-    try {
-        // Check if database exists
-        const result = await adminPool.query(
-            'SELECT 1 FROM pg_database WHERE datname = $1',
-            [dbName]
-        );
+    // Railway PostgreSQL connection
+    if (process.env.DATABASE_URL) {
+        // Direct connection with DATABASE_URL (Railway style)
+        log('🚂 Connecting to Railway PostgreSQL...');
+        pool = new Pool({
+            connectionString: process.env.DATABASE_URL,
+            ssl: {
+                rejectUnauthorized: false
+            }
+        });
+    } else {
+        // Manual connection (fallback)
+        const config = {
+            user: process.env.PGUSER,
+            password: process.env.PGPASSWORD,
+            host: process.env.PGHOST,
+            port: process.env.PGPORT || 5432,
+            database: process.env.PGDATABASE,
+            ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+        };
         
-        if (result.rows.length === 0) {
-            // Database doesn't exist, create it
-            log(`🗄️ Database '${dbName}' doesn't exist, creating it...`);
-            await adminPool.query(`CREATE DATABASE "${dbName}"`);
-            log(`✅ Database '${dbName}' created successfully!`);
-        } else {
-            debugLog(`🗄️ Database '${dbName}' already exists`);
+        if (!config.user || !config.password || !config.host || !config.database) {
+            throw new Error('DATABASE_URL or individual PostgreSQL environment variables are required');
         }
         
-        await adminPool.end();
-        
-        // Now create the main pool with the actual database
-        pool = new Pool({
-            connectionString: databaseUrl,
-            ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
-        });
-        
-        log('🗄️ PostgreSQL connection established');
-        
+        log('🗄️ Connecting to PostgreSQL with manual config...');
+        pool = new Pool(config);
+    }
+    
+    // Test the connection
+    try {
+        const client = await pool.connect();
+        const result = await client.query('SELECT NOW()');
+        log(`✅ PostgreSQL connected successfully at ${result.rows[0].now}`);
+        client.release();
     } catch (error) {
-        await adminPool.end();
+        log(`❌ PostgreSQL connection failed: ${error.message}`);
         throw error;
     }
 }
