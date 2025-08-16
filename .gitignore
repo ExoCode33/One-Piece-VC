@@ -7,3 +7,11 @@ dist/
 build/
 tmp/
 temp/
+logs/
+*.sqlite
+*.db
+.vscode/
+.idea/
+coverage/
+.nyc_output/
+.cache/
