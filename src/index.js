@@ -614,7 +614,156 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
                         } else {
                             debugLog(`👥 Crew ${oldChannel.name} no longer empty, keeping it`);
                         }
-                        console.error('❌ Error getting voice stats:', error);
+                    } catch (error) {
+                        console.error(`❌ Error deleting channel ${oldChannel.name}:`, error);
+                    }
+                }, DELETE_DELAY);
+            }
+        }
+
+    } catch (error) {
+        console.error('❌ Error in voiceStateUpdate:', error);
+    }
+});
+
+// Handle category moves - sync to database when category is moved/renamed
+client.on('channelUpdate', async (oldChannel, newChannel) => {
+    try {
+        // Check if this is a category update
+        if (newChannel.type === ChannelType.GuildCategory) {
+            const guildId = newChannel.guild.id;
+            const savedCategory = await getCategoryForGuild(guildId);
+            
+            // If this is our saved category and it was moved/renamed
+            if (savedCategory && savedCategory.categoryId === newChannel.id) {
+                if (savedCategory.categoryName !== newChannel.name) {
+                    await updateCategoryForGuild(guildId, newChannel.id, newChannel.name);
+                    log(`📁 Category renamed and synced: ${savedCategory.categoryName} → ${newChannel.name}`);
+                }
+            }
+        }
+    } catch (error) {
+        console.error('❌ Error handling category update:', error);
+    }
+});
+
+// Slash command handler
+client.on('interactionCreate', async (interaction) => {
+    if (!interaction.isChatInputCommand()) return;
+
+    const { commandName } = interaction;
+
+    try {
+        if (commandName === 'check-voice-time') {
+            const targetUser = interaction.options.getUser('user') || interaction.user;
+            const voiceData = await voiceTimeTracker.getUserVoiceTime(targetUser.id, interaction.guild.id);
+            
+            if (!voiceData || voiceData.total_seconds === 0) {
+                await interaction.reply({
+                    content: `📊 ${targetUser.displayName} has no recorded voice time in this server.`,
+                    ephemeral: true
+                });
+                return;
+            }
+
+            const formattedTime = voiceTimeTracker.formatTime(voiceData.total_seconds);
+            const lastActive = new Date(voiceData.last_updated).toLocaleDateString();
+
+            const embed = new EmbedBuilder()
+                .setColor('#0099ff')
+                .setTitle('🎤 Voice Time Statistics')
+                .setThumbnail(targetUser.displayAvatarURL())
+                .addFields(
+                    { name: '👤 User', value: targetUser.displayName, inline: true },
+                    { name: '⏱️ Total Voice Time', value: formattedTime, inline: true },
+                    { name: '📅 Last Active', value: lastActive, inline: true }
+                )
+                .setTimestamp()
+                .setFooter({ text: 'One Piece Voice Bot' });
+
+            await interaction.reply({ embeds: [embed] });
+        }
+
+        else if (commandName === 'voice-leaderboard') {
+            const limit = interaction.options.getInteger('limit') || 10;
+            const topUsers = await voiceTimeTracker.getTopVoiceUsers(interaction.guild.id, limit);
+
+            if (topUsers.length === 0) {
+                await interaction.reply({
+                    content: '📊 No voice time data found for this server.',
+                    ephemeral: true
+                });
+                return;
+            }
+
+            const embed = new EmbedBuilder()
+                .setColor('#FFD700')
+                .setTitle('🏆 Voice Time Leaderboard')
+                .setDescription(`Top ${topUsers.length} voice users in ${interaction.guild.name}`)
+                .setTimestamp()
+                .setFooter({ text: 'One Piece Voice Bot' });
+
+            let description = '';
+            topUsers.forEach((user, index) => {
+                const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : `${index + 1}.`;
+                const formattedTime = voiceTimeTracker.formatTime(user.total_seconds);
+                description += `${medal} **${user.username}** - ${formattedTime}\n`;
+            });
+
+            embed.addFields({ name: '🎤 Rankings', value: description });
+
+            await interaction.reply({ embeds: [embed] });
+        }
+
+        else if (commandName === 'bot-info') {
+            const uptime = process.uptime();
+            const hours = Math.floor(uptime / 3600);
+            const minutes = Math.floor((uptime % 3600) / 60);
+
+            const embed = new EmbedBuilder()
+                .setColor('#FF6B6B')
+                .setTitle('🏴‍☠️ One Piece Voice Bot Info')
+                .addFields(
+                    { name: '⚓ Servers', value: `${client.guilds.cache.size}`, inline: true },
+                    { name: '👤 Active Voice Sessions', value: `${voiceTimeTracker.getActiveSessionsCount()}`, inline: true },
+                    { name: '🎵 Audio Connections', value: `${activeConnections.size}`, inline: true },
+                    { name: '⏰ Uptime', value: `${hours}h ${minutes}m`, inline: true },
+                    { name: '🗄️ Database', value: 'Connected', inline: true },
+                    { name: '🎤 Features', value: 'Dynamic Channels, Voice Tracking, Welcome Sounds', inline: false }
+                )
+                .setTimestamp()
+                .setFooter({ text: 'One Piece Voice Bot' });
+
+            await interaction.reply({ embeds: [embed] });
+        }
+
+    } catch (error) {
+        console.error('❌ Error handling slash command:', error);
+        if (!interaction.replied) {
+            await interaction.reply({
+                content: '❌ An error occurred while processing this command.',
+                ephemeral: true
+            });
+        }
+    }
+});
+
+// Legacy message commands and testing commands
+client.on('messageCreate', async (message) => {
+    if (message.author.bot) return;
+    
+    // Voice stats command (legacy)
+    if (message.content === '!voicestats' || message.content === '!stats') {
+        try {
+            const voiceData = await voiceTimeTracker.getUserVoiceTime(message.author.id, message.guild.id);
+            if (voiceData && voiceData.total_seconds > 0) {
+                const formattedTime = voiceTimeTracker.formatTime(voiceData.total_seconds);
+                message.reply(`📊 **${message.author.displayName}'s Voice Time**\n⏱️ **Total:** ${formattedTime}\n💡 Use \`/check-voice-time\` for better formatting!`);
+            } else {
+                message.reply('📊 No voice time recorded! Join some voice channels to start tracking! 🎤');
+            }
+        } catch (error) {
+            console.error('❌ Error getting voice stats:', error);
             message.reply('❌ Error retrieving voice stats. Please try again later.');
         }
     }
@@ -896,151 +1045,3 @@ async function startBot() {
 
 // Start the bot
 startBot();
-                        console.error(`❌ Error deleting channel ${oldChannel.name}:`, error);
-                    }
-                }, DELETE_DELAY);
-            }
-        }
-
-    } catch (error) {
-        console.error('❌ Error in voiceStateUpdate:', error);
-    }
-});
-
-// Handle category moves - sync to database when category is moved/renamed
-client.on('channelUpdate', async (oldChannel, newChannel) => {
-    try {
-        // Check if this is a category update
-        if (newChannel.type === ChannelType.GuildCategory) {
-            const guildId = newChannel.guild.id;
-            const savedCategory = await getCategoryForGuild(guildId);
-            
-            // If this is our saved category and it was moved/renamed
-            if (savedCategory && savedCategory.categoryId === newChannel.id) {
-                if (savedCategory.categoryName !== newChannel.name) {
-                    await updateCategoryForGuild(guildId, newChannel.id, newChannel.name);
-                    log(`📁 Category renamed and synced: ${savedCategory.categoryName} → ${newChannel.name}`);
-                }
-            }
-        }
-    } catch (error) {
-        console.error('❌ Error handling category update:', error);
-    }
-});
-
-// Slash command handler
-client.on('interactionCreate', async (interaction) => {
-    if (!interaction.isChatInputCommand()) return;
-
-    const { commandName } = interaction;
-
-    try {
-        if (commandName === 'check-voice-time') {
-            const targetUser = interaction.options.getUser('user') || interaction.user;
-            const voiceData = await voiceTimeTracker.getUserVoiceTime(targetUser.id, interaction.guild.id);
-            
-            if (!voiceData || voiceData.total_seconds === 0) {
-                await interaction.reply({
-                    content: `📊 ${targetUser.displayName} has no recorded voice time in this server.`,
-                    ephemeral: true
-                });
-                return;
-            }
-
-            const formattedTime = voiceTimeTracker.formatTime(voiceData.total_seconds);
-            const lastActive = new Date(voiceData.last_updated).toLocaleDateString();
-
-            const embed = new EmbedBuilder()
-                .setColor('#0099ff')
-                .setTitle('🎤 Voice Time Statistics')
-                .setThumbnail(targetUser.displayAvatarURL())
-                .addFields(
-                    { name: '👤 User', value: targetUser.displayName, inline: true },
-                    { name: '⏱️ Total Voice Time', value: formattedTime, inline: true },
-                    { name: '📅 Last Active', value: lastActive, inline: true }
-                )
-                .setTimestamp()
-                .setFooter({ text: 'One Piece Voice Bot' });
-
-            await interaction.reply({ embeds: [embed] });
-        }
-
-        else if (commandName === 'voice-leaderboard') {
-            const limit = interaction.options.getInteger('limit') || 10;
-            const topUsers = await voiceTimeTracker.getTopVoiceUsers(interaction.guild.id, limit);
-
-            if (topUsers.length === 0) {
-                await interaction.reply({
-                    content: '📊 No voice time data found for this server.',
-                    ephemeral: true
-                });
-                return;
-            }
-
-            const embed = new EmbedBuilder()
-                .setColor('#FFD700')
-                .setTitle('🏆 Voice Time Leaderboard')
-                .setDescription(`Top ${topUsers.length} voice users in ${interaction.guild.name}`)
-                .setTimestamp()
-                .setFooter({ text: 'One Piece Voice Bot' });
-
-            let description = '';
-            topUsers.forEach((user, index) => {
-                const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : `${index + 1}.`;
-                const formattedTime = voiceTimeTracker.formatTime(user.total_seconds);
-                description += `${medal} **${user.username}** - ${formattedTime}\n`;
-            });
-
-            embed.addFields({ name: '🎤 Rankings', value: description });
-
-            await interaction.reply({ embeds: [embed] });
-        }
-
-        else if (commandName === 'bot-info') {
-            const uptime = process.uptime();
-            const hours = Math.floor(uptime / 3600);
-            const minutes = Math.floor((uptime % 3600) / 60);
-
-            const embed = new EmbedBuilder()
-                .setColor('#FF6B6B')
-                .setTitle('🏴‍☠️ One Piece Voice Bot Info')
-                .addFields(
-                    { name: '⚓ Servers', value: `${client.guilds.cache.size}`, inline: true },
-                    { name: '👤 Active Voice Sessions', value: `${voiceTimeTracker.getActiveSessionsCount()}`, inline: true },
-                    { name: '🎵 Audio Connections', value: `${activeConnections.size}`, inline: true },
-                    { name: '⏰ Uptime', value: `${hours}h ${minutes}m`, inline: true },
-                    { name: '🗄️ Database', value: 'Connected', inline: true },
-                    { name: '🎤 Features', value: 'Dynamic Channels, Voice Tracking, Welcome Sounds', inline: false }
-                )
-                .setTimestamp()
-                .setFooter({ text: 'One Piece Voice Bot' });
-
-            await interaction.reply({ embeds: [embed] });
-        }
-
-    } catch (error) {
-        console.error('❌ Error handling slash command:', error);
-        if (!interaction.replied) {
-            await interaction.reply({
-                content: '❌ An error occurred while processing this command.',
-                ephemeral: true
-            });
-        }
-    }
-});
-
-// Legacy message commands and testing commands
-client.on('messageCreate', async (message) => {
-    if (message.author.bot) return;
-    
-    // Voice stats command (legacy)
-    if (message.content === '!voicestats' || message.content === '!stats') {
-        try {
-            const voiceData = await voiceTimeTracker.getUserVoiceTime(message.author.id, message.guild.id);
-            if (voiceData && voiceData.total_seconds > 0) {
-                const formattedTime = voiceTimeTracker.formatTime(voiceData.total_seconds);
-                message.reply(`📊 **${message.author.displayName}'s Voice Time**\n⏱️ **Total:** ${formattedTime}\n💡 Use \`/check-voice-time\` for better formatting!`);
-            } else {
-                message.reply('📊 No voice time recorded! Join some voice channels to start tracking! 🎤');
-            }
-        } catch (error) {
