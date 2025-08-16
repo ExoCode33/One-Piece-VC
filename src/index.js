@@ -1,9 +1,10 @@
-const { Client, GatewayIntentBits, ChannelType, PermissionFlagsBits } = require('discord.js');
+const { Client, GatewayIntentBits, ChannelType, PermissionFlagsBits, EmbedBuilder } = require('discord.js');
 const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, VoiceConnectionStatus } = require('@discordjs/voice');
 const { Pool } = require('pg');
 const fs = require('fs');
 const path = require('path');
-const VoiceActivityLogger = require('./voiceActivityLogger');
+const VoiceTimeTracker = require('./voiceTimeTracker');
+const { registerSlashCommands } = require('./slashCommands');
 
 // Load environment variables
 require('dotenv').config();
@@ -22,7 +23,7 @@ const AUDIO_VOLUME = parseFloat(process.env.AUDIO_VOLUME) || 0.4;
 
 // PostgreSQL connection with auto-database creation
 let pool;
-let voiceLogger;
+let voiceTimeTracker;
 
 async function initializeConnection() {
     const databaseUrl = process.env.DATABASE_URL;
@@ -120,8 +121,7 @@ const client = new Client({
     ]
 });
 
-// Track user voice sessions and audio connections
-const voiceSessions = new Map(); // userId -> { sessionId, joinTime, channelId, channelName }
+// Track audio connections
 const activeConnections = new Map(); // channelId -> voice connection
 
 // Audio file paths
@@ -143,10 +143,10 @@ function getRandomCrewName() {
     return CREW_NAMES[Math.floor(Math.random() * CREW_NAMES.length)];
 }
 
-// Database functions
+// Database functions for guild settings
 async function initializeDatabase() {
     try {
-        // Create guild_settings table
+        // Create guild_settings table (keep this for category management)
         await pool.query(`
             CREATE TABLE IF NOT EXISTS guild_settings (
                 guild_id VARCHAR(255) PRIMARY KEY,
@@ -154,37 +154,6 @@ async function initializeDatabase() {
                 category_name VARCHAR(255) NOT NULL,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
-        `);
-
-        // Create voice_time_tracking table
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS voice_time_tracking (
-                id SERIAL PRIMARY KEY,
-                user_id VARCHAR(255) NOT NULL,
-                guild_id VARCHAR(255) NOT NULL,
-                channel_id VARCHAR(255) NOT NULL,
-                channel_name VARCHAR(255) NOT NULL,
-                join_time TIMESTAMP NOT NULL,
-                leave_time TIMESTAMP,
-                duration_seconds INTEGER,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-
-        // Create indexes for better performance
-        await pool.query(`
-            CREATE INDEX IF NOT EXISTS idx_voice_tracking_user_guild 
-            ON voice_time_tracking(user_id, guild_id)
-        `);
-
-        await pool.query(`
-            CREATE INDEX IF NOT EXISTS idx_voice_tracking_join_time 
-            ON voice_time_tracking(join_time)
-        `);
-
-        await pool.query(`
-            CREATE INDEX IF NOT EXISTS idx_voice_tracking_duration 
-            ON voice_time_tracking(duration_seconds)
         `);
 
         log('✅ Database tables initialized successfully');
@@ -229,77 +198,6 @@ async function updateCategoryForGuild(guildId, categoryId, categoryName) {
         debugLog(`📝 Updated category for guild ${guildId}: ${categoryName} (${categoryId})`);
     } catch (error) {
         console.error('❌ Error updating category in database:', error);
-    }
-}
-
-async function startVoiceSession(userId, guildId, channelId, channelName) {
-    try {
-        const result = await pool.query(`
-            INSERT INTO voice_time_tracking (user_id, guild_id, channel_id, channel_name, join_time)
-            VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)
-            RETURNING id
-        `, [userId, guildId, channelId, channelName]);
-        
-        const sessionId = result.rows[0].id;
-        voiceSessions.set(userId, {
-            sessionId: sessionId,
-            joinTime: new Date(),
-            channelId: channelId,
-            channelName: channelName
-        });
-        
-        debugLog(`🎤 Started voice session for user ${userId} in ${channelName}`);
-        return sessionId;
-    } catch (error) {
-        console.error('❌ Error starting voice session:', error);
-        return null;
-    }
-}
-
-async function endVoiceSession(userId) {
-    try {
-        const session = voiceSessions.get(userId);
-        if (!session) {
-            debugLog(`🤔 No active session found for user ${userId}`);
-            return;
-        }
-        
-        const duration = Math.floor((new Date() - session.joinTime) / 1000); // Duration in seconds
-        
-        await pool.query(`
-            UPDATE voice_time_tracking 
-            SET leave_time = CURRENT_TIMESTAMP, duration_seconds = $1
-            WHERE id = $2
-        `, [duration, session.sessionId]);
-        
-        voiceSessions.delete(userId);
-        
-        debugLog(`🎤 Ended voice session for user ${userId}. Duration: ${duration} seconds`);
-        log(`⏱️ Voice session ended: ${Math.floor(duration / 60)}m ${duration % 60}s in ${session.channelName}`);
-    } catch (error) {
-        console.error('❌ Error ending voice session:', error);
-    }
-}
-
-async function getUserVoiceStats(userId, guildId, days = 30) {
-    try {
-        const result = await pool.query(`
-            SELECT 
-                COUNT(*) as session_count,
-                SUM(duration_seconds) as total_seconds,
-                AVG(duration_seconds) as avg_seconds,
-                MAX(duration_seconds) as longest_seconds
-            FROM voice_time_tracking 
-            WHERE user_id = $1 
-                AND guild_id = $2 
-                AND join_time >= CURRENT_TIMESTAMP - INTERVAL '${days} days'
-                AND duration_seconds IS NOT NULL
-        `, [userId, guildId]);
-        
-        return result.rows[0];
-    } catch (error) {
-        console.error('❌ Error getting user voice stats:', error);
-        return null;
     }
 }
 
@@ -404,7 +302,7 @@ async function playWelcomeSound(channel) {
                     activeConnections.delete(channel.id);
                 }
             }
-        }, 5000); // Reduced from 10 seconds to 5 seconds
+        }, 5000);
 
     } catch (error) {
         console.error(`❌ Error joining ${channel.name}:`, error);
@@ -488,25 +386,6 @@ client.once('ready', async () => {
         console.warn(`📁 Make sure the file exists in the sounds folder`);
     }
     
-    // Check for FFmpeg availability
-    try {
-        const { spawn } = require('child_process');
-        const ffmpeg = spawn('ffmpeg', ['-version']);
-        ffmpeg.on('close', (code) => {
-            if (code === 0) {
-                log(`🔧 FFmpeg is available - audio features enabled`);
-            } else {
-                console.warn(`⚠️ FFmpeg check failed with code ${code}`);
-            }
-        });
-        ffmpeg.on('error', (error) => {
-            console.warn(`⚠️ FFmpeg not found - audio features may not work`);
-            console.warn(`💡 This is expected on some hosting platforms`);
-        });
-    } catch (error) {
-        console.warn(`⚠️ Could not check FFmpeg availability`);
-    }
-    
     if (CATEGORY_ID) {
         log(`🎯 Using direct category ID: ${CATEGORY_ID}`);
     } else {
@@ -520,10 +399,13 @@ client.once('ready', async () => {
         // Initialize database tables
         await initializeDatabase();
         
-        // Initialize voice activity logger
-        voiceLogger = new VoiceActivityLogger(client, pool);
-        if (process.env.ENABLE_VOICE_LOGGING === 'true') {
-            log(`🔍 Voice Activity Logger enabled - Target channel: ${process.env.VOICE_LOG_CHANNEL || 'voice-activity-log'}`);
+        // Initialize voice time tracker (this will wipe old tables)
+        voiceTimeTracker = new VoiceTimeTracker(client, pool);
+        log(`⏱️ Voice Time Tracker initialized (database wiped and recreated)`);
+        
+        // Register slash commands
+        if (CLIENT_ID) {
+            await registerSlashCommands(CLIENT_ID, DISCORD_TOKEN);
         }
         
         // Test database connection
@@ -543,12 +425,14 @@ client.once('ready', async () => {
                 .forEach(channel => {
                     channel.members.forEach(member => {
                         if (!member.user.bot) {
-                            const userId = member.id;
-                            const guildId = guild.id;
-                            const channelId = channel.id;
-                            
                             // Start tracking existing users
-                            startVoiceSession(userId, guildId, channelId, channel.name);
+                            voiceTimeTracker.startSession(
+                                member.id, 
+                                member.displayName, 
+                                guild.id, 
+                                channel.id, 
+                                channel.name
+                            );
                             
                             log(`🔄 Now tracking existing user: ${member.displayName} in ${channel.name}`);
                         }
@@ -570,25 +454,9 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
     const guildId = newState.guild.id;
 
     try {
-        // Add voice activity logging
-        if (voiceLogger) {
-            await voiceLogger.handleVoiceStateUpdate(oldState, newState);
-        }
-
-        // Handle voice session tracking
-        if (oldState.channelId && !newState.channelId) {
-            // User left voice completely
-            await endVoiceSession(userId);
-            debugLog(`👤 ${member.displayName} left voice chat`);
-        } else if (!oldState.channelId && newState.channelId) {
-            // User joined voice
-            await startVoiceSession(userId, guildId, newState.channelId, newState.channel.name);
-            debugLog(`👤 ${member.displayName} joined ${newState.channel.name}`);
-        } else if (oldState.channelId && newState.channelId && oldState.channelId !== newState.channelId) {
-            // User moved between channels
-            await endVoiceSession(userId);
-            await startVoiceSession(userId, guildId, newState.channelId, newState.channel.name);
-            debugLog(`👤 ${member.displayName} moved from ${oldState.channel.name} to ${newState.channel.name}`);
+        // Handle voice time tracking
+        if (voiceTimeTracker) {
+            await voiceTimeTracker.handleVoiceStateUpdate(oldState, newState);
         }
 
         // Dynamic Voice Channel Creation
@@ -684,7 +552,7 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
                     log(`🎵 Playing welcome sound in ${crewName}...`);
                     setTimeout(() => {
                         playWelcomeSound(newChannel);
-                    }, 1500); // Reduced from 3 seconds to 1.5 seconds
+                    }, 1500);
                     
                 } else {
                     debugLog(`User ${member.displayName} disconnected before move, cleaning up channel`);
@@ -744,6 +612,7 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
                         } else {
                             debugLog(`👥 Crew ${oldChannel.name} no longer empty, keeping it`);
                         }
+                    } catch (error) {
                         console.error(`❌ Error deleting channel ${oldChannel.name}:`, error);
                     }
                 }, DELETE_DELAY);
@@ -776,151 +645,124 @@ client.on('channelUpdate', async (oldChannel, newChannel) => {
     }
 });
 
-// Message commands for voice stats and bot management
+// Slash command handler
+client.on('interactionCreate', async (interaction) => {
+    if (!interaction.isChatInputCommand()) return;
+
+    const { commandName } = interaction;
+
+    try {
+        if (commandName === 'check-voice-time') {
+            const targetUser = interaction.options.getUser('user') || interaction.user;
+            const voiceData = await voiceTimeTracker.getUserVoiceTime(targetUser.id, interaction.guild.id);
+            
+            if (!voiceData || voiceData.total_seconds === 0) {
+                await interaction.reply({
+                    content: `📊 ${targetUser.displayName} has no recorded voice time in this server.`,
+                    ephemeral: true
+                });
+                return;
+            }
+
+            const formattedTime = voiceTimeTracker.formatTime(voiceData.total_seconds);
+            const lastActive = new Date(voiceData.last_updated).toLocaleDateString();
+
+            const embed = new EmbedBuilder()
+                .setColor('#0099ff')
+                .setTitle('🎤 Voice Time Statistics')
+                .setThumbnail(targetUser.displayAvatarURL())
+                .addFields(
+                    { name: '👤 User', value: targetUser.displayName, inline: true },
+                    { name: '⏱️ Total Voice Time', value: formattedTime, inline: true },
+                    { name: '📅 Last Active', value: lastActive, inline: true }
+                )
+                .setTimestamp()
+                .setFooter({ text: 'One Piece Voice Bot' });
+
+            await interaction.reply({ embeds: [embed] });
+        }
+
+        else if (commandName === 'voice-leaderboard') {
+            const limit = interaction.options.getInteger('limit') || 10;
+            const topUsers = await voiceTimeTracker.getTopVoiceUsers(interaction.guild.id, limit);
+
+            if (topUsers.length === 0) {
+                await interaction.reply({
+                    content: '📊 No voice time data found for this server.',
+                    ephemeral: true
+                });
+                return;
+            }
+
+            const embed = new EmbedBuilder()
+                .setColor('#FFD700')
+                .setTitle('🏆 Voice Time Leaderboard')
+                .setDescription(`Top ${topUsers.length} voice users in ${interaction.guild.name}`)
+                .setTimestamp()
+                .setFooter({ text: 'One Piece Voice Bot' });
+
+            let description = '';
+            topUsers.forEach((user, index) => {
+                const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : `${index + 1}.`;
+                const formattedTime = voiceTimeTracker.formatTime(user.total_seconds);
+                description += `${medal} **${user.username}** - ${formattedTime}\n`;
+            });
+
+            embed.addFields({ name: '🎤 Rankings', value: description });
+
+            await interaction.reply({ embeds: [embed] });
+        }
+
+        else if (commandName === 'bot-info') {
+            const uptime = process.uptime();
+            const hours = Math.floor(uptime / 3600);
+            const minutes = Math.floor((uptime % 3600) / 60);
+
+            const embed = new EmbedBuilder()
+                .setColor('#FF6B6B')
+                .setTitle('🏴‍☠️ One Piece Voice Bot Info')
+                .addFields(
+                    { name: '⚓ Servers', value: `${client.guilds.cache.size}`, inline: true },
+                    { name: '👤 Active Voice Sessions', value: `${voiceTimeTracker.getActiveSessionsCount()}`, inline: true },
+                    { name: '🎵 Audio Connections', value: `${activeConnections.size}`, inline: true },
+                    { name: '⏰ Uptime', value: `${hours}h ${minutes}m`, inline: true },
+                    { name: '🗄️ Database', value: 'Connected', inline: true },
+                    { name: '🎤 Features', value: 'Dynamic Channels, Voice Tracking, Welcome Sounds', inline: false }
+                )
+                .setTimestamp()
+                .setFooter({ text: 'One Piece Voice Bot' });
+
+            await interaction.reply({ embeds: [embed] });
+        }
+
+    } catch (error) {
+        console.error('❌ Error handling slash command:', error);
+        if (!interaction.replied) {
+            await interaction.reply({
+                content: '❌ An error occurred while processing this command.',
+                ephemeral: true
+            });
+        }
+    }
+});
+
+// Legacy message commands (keeping some for backwards compatibility)
 client.on('messageCreate', async (message) => {
     if (message.author.bot) return;
     
-    // Voice stats command
+    // Voice stats command (legacy)
     if (message.content === '!voicestats' || message.content === '!stats') {
         try {
-            const stats = await getUserVoiceStats(message.author.id, message.guild.id);
-            if (stats && stats.total_seconds > 0) {
-                const totalHours = Math.floor(stats.total_seconds / 3600);
-                const totalMinutes = Math.floor((stats.total_seconds % 3600) / 60);
-                const avgMinutes = Math.floor(stats.avg_seconds / 60);
-                const longestHours = Math.floor(stats.longest_seconds / 3600);
-                const longestMinutes = Math.floor((stats.longest_seconds % 3600) / 60);
-                
-                message.reply(`📊 **${message.author.displayName}'s Voice Stats (Last 30 days)**\n` +
-                    `🎤 **Sessions:** ${stats.session_count}\n` +
-                    `⏱️ **Total Time:** ${totalHours}h ${totalMinutes}m\n` +
-                    `📈 **Average Session:** ${avgMinutes}m\n` +
-                    `🏆 **Longest Session:** ${longestHours}h ${longestMinutes}m`);
+            const voiceData = await voiceTimeTracker.getUserVoiceTime(message.author.id, message.guild.id);
+            if (voiceData && voiceData.total_seconds > 0) {
+                const formattedTime = voiceTimeTracker.formatTime(voiceData.total_seconds);
+                message.reply(`📊 **${message.author.displayName}'s Voice Time**\n⏱️ **Total:** ${formattedTime}\n💡 Use \`/check-voice-time\` for better formatting!`);
             } else {
-                message.reply('📊 No voice activity recorded in the last 30 days! Join some voice channels to start tracking your stats! 🎤');
+                message.reply('📊 No voice time recorded! Join some voice channels to start tracking! 🎤');
             }
         } catch (error) {
             console.error('❌ Error getting voice stats:', error);
             message.reply('❌ Error retrieving voice stats. Please try again later.');
-        }
-    }
-    
-    // Voice activity logs command
-    if (message.content === '!voicelogs' || message.content.startsWith('!voicelogs ')) {
-        if (!message.member.permissions.has(PermissionFlagsBits.ManageChannels)) {
-            return message.reply('❌ You need Manage Channels permission to view voice logs!');
-        }
-
-        try {
-            const args = message.content.split(' ');
-            const limit = args[1] ? parseInt(args[1]) : 20;
-            
-            if (limit > 100) {
-                return message.reply('❌ Maximum limit is 100 logs!');
-            }
-
-            const logs = await voiceLogger.getRecentLogs(message.guild.id, limit);
-            
-            if (logs.length === 0) {
-                return message.reply('📝 No voice activity logs found!');
-            }
-
-            const logText = logs.map(log => {
-                const time = new Date(log.timestamp).toLocaleString();
-                const action = log.action;
-                const channel = log.channel_name || 'Unknown';
-                return `\`${time}\` **${log.username}** ${action} ${channel}`;
-            }).join('\n');
-
-            // Split into multiple messages if too long
-            const chunks = logText.match(/.{1,1900}/g) || [logText];
-            
-            for (let i = 0; i < chunks.length; i++) {
-                await message.reply(`📋 **Voice Activity Logs (${logs.length} entries)** ${i > 0 ? `(Part ${i+1})` : ''}\n${chunks[i]}`);
-            }
-        } catch (error) {
-            console.error('❌ Error getting voice logs:', error);
-            message.reply('❌ Error retrieving voice logs. Please try again later.');
-        }
-    }
-
-    // User voice activity stats command
-    if (message.content.startsWith('!voiceactivity ') || message.content === '!voiceactivity') {
-        try {
-            let targetUser = message.author;
-            
-            // Check if user mentioned someone else
-            if (message.mentions.users.size > 0) {
-                targetUser = message.mentions.users.first();
-            }
-
-            const stats = await voiceLogger.getUserActivityStats(targetUser.id, message.guild.id, 7);
-            
-            if (stats.length === 0) {
-                return message.reply(`📊 No voice activity found for ${targetUser.displayName} in the last 7 days!`);
-            }
-
-            // Group stats by action
-            const actionCounts = {};
-            stats.forEach(stat => {
-                actionCounts[stat.action] = (actionCounts[stat.action] || 0) + parseInt(stat.count);
-            });
-
-            let statsText = `📊 **${targetUser.displayName}'s Voice Activity (Last 7 days)**\n`;
-            Object.entries(actionCounts).forEach(([action, count]) => {
-                const emoji = {
-                    'JOIN': '🎤',
-                    'LEAVE': '👋',
-                    'MOVE': '🔄',
-                    'MUTE': '🔇',
-                    'UNMUTE': '🔊'
-                }[action] || '❓';
-                
-                statsText += `${emoji} **${action}:** ${count}\n`;
-            });
-
-            message.reply(statsText);
-        } catch (error) {
-            console.error('❌ Error getting voice activity stats:', error);
-            message.reply('❌ Error retrieving voice activity stats. Please try again later.');
-        }
-    }
-
-    // Command to create voice log channel
-    if (message.content === '!createvoicelog') {
-        if (!message.member.permissions.has(PermissionFlagsBits.ManageChannels)) {
-            return message.reply('❌ You need Manage Channels permission to create the voice log channel!');
-        }
-
-        const channelName = process.env.VOICE_LOG_CHANNEL || 'voice-activity-log';
-        
-        // Check if channel already exists
-        const existingChannel = message.guild.channels.cache.find(channel => 
-            channel.name === channelName && channel.type === 0
-        );
-
-        if (existingChannel) {
-            return message.reply(`✅ Voice log channel already exists: ${existingChannel}`);
-        }
-
-        try {
-            const newChannel = await message.guild.channels.create({
-                name: channelName,
-                type: 0, // Text channel
-                topic: 'Automatic voice activity logging - Join/Leave/Move events',
-                permissionOverwrites: [
-                    {
-                        id: message.guild.id, // @everyone
-                        deny: [PermissionFlagsBits.SendMessages], // Only allow viewing, not sending
-                        allow: [PermissionFlagsBits.ViewChannel]
-                    }
-                ]
-            });
-
-            message.reply(`✅ Created voice log channel: ${newChannel}\n🔍 Voice activity will now be logged here!`);
-        } catch (error) {
-            console.error('❌ Error creating voice log channel:', error);
-            message.reply('❌ Error creating voice log channel. Please check bot permissions.');
         }
     }
     
@@ -933,42 +775,7 @@ client.on('messageCreate', async (message) => {
 ⚓ Ready to set sail!`);
     }
     
-    // Bot info command
-    if (message.content === '!botinfo') {
-        const uptime = process.uptime();
-        const hours = Math.floor(uptime / 3600);
-        const minutes = Math.floor((uptime % 3600) / 60);
-        
-        message.reply(`🏴‍☠️ **One Piece Voice Bot Info**
-⚓ **Servers:** ${client.guilds.cache.size}
-👤 **Active Voice Sessions:** ${voiceSessions.size}
-🎵 **Active Audio Connections:** ${activeConnections.size}
-⏰ **Uptime:** ${hours}h ${minutes}m
-🗄️ **Database:** Connected
-🔍 **Voice Logging:** ${process.env.ENABLE_VOICE_LOGGING === 'true' ? 'Enabled' : 'Disabled'}
-🎤 **Features:** Dynamic Voice Channels, Voice Time Tracking, Welcome Sounds, Activity Logging`);
-    }
-    
-    // Fast sound test command for speed testing
-    if (message.content === '!fastsound') {
-        if (!message.member.voice.channel) {
-            return message.reply('❌ You need to be in a voice channel!');
-        }
-        
-        const startTime = Date.now();
-        message.reply('🎵 Testing fast welcome sound...').then(() => {
-            playWelcomeSound(message.member.voice.channel);
-            
-            // Report timing
-            setTimeout(() => {
-                const totalTime = Date.now() - startTime;
-                message.channel.send(`⏱️ **Speed Test Results:**
-🚀 **Total time:** ${totalTime}ms
-🎯 **Target:** Under 2000ms for good performance`);
-            }, 3000);
-        });
-    }
-    
+    // Test sound command
     if (message.content === '!testsound') {
         if (!message.member.voice.channel) {
             return message.reply('❌ You need to be in a voice channel to test the sound!');
@@ -998,17 +805,14 @@ client.on('messageCreate', async (message) => {
         message.reply(`🏴‍☠️ **One Piece Voice Bot Commands**
 
 **📊 Voice Tracking:**
-\`!voicestats\` or \`!stats\` - View your voice activity stats (last 30 days)
-\`!voiceactivity [@user]\` - View voice activity stats for a user (last 7 days)
-\`!voicelogs [limit]\` - View recent voice activity logs (requires Manage Channels)
-\`!createvoicelog\` - Create voice activity log channel (requires Manage Channels)
+\`/check-voice-time [@user]\` - Check voice time for a user (NEW!)
+\`/voice-leaderboard [limit]\` - Show top voice users (NEW!)
+\`/bot-info\` - Show bot information (NEW!)
+\`!voicestats\` - Legacy voice stats command
 \`!ping\` - Check bot latency
-\`!botinfo\` - View bot information
-\`!help\` - Show this help message
 
 **🎵 Audio Testing:**
 \`!testsound\` - Test welcome sound in your current voice channel
-\`!fastsound\` - Speed test for bot join/play/leave timing
 \`!checksound\` - Check if sound file exists and show details
 
 **🚢 How to Use:**
@@ -1017,20 +821,17 @@ client.on('messageCreate', async (message) => {
 3. You become the captain with full channel permissions
 4. Bot plays welcome sound (if file exists)
 5. Empty crews are automatically deleted after ${DELETE_DELAY/1000} seconds
-6. All voice activity is logged with timestamps!
+6. Voice time is automatically tracked!
 
 **🎯 Features:**
 • Dynamic voice channel creation with One Piece themed names
-• Auto-synced category permissions
-• Voice time tracking with PostgreSQL database
-• **Real-time voice activity logging with local timestamps**
+• **Simplified voice time tracking (total time only)**
 • Captain permissions for channel creators
 • Automatic cleanup of empty channels
 • Welcome sounds with The Going Merry theme
-• Detailed voice analytics and statistics
+• **Slash commands for better user experience**
 
-**🔍 Voice Activity Logging:**
-Set \`ENABLE_VOICE_LOGGING=true\` and create a log channel with \`!createvoicelog\` to track all voice events including joins, leaves, moves, and mute/unmute actions with precise timestamps!`);
+**💡 Use slash commands (/) for the best experience!**`);
     }
 });
 
@@ -1060,9 +861,8 @@ async function gracefulShutdown() {
     
     try {
         // End all active voice sessions
-        log(`⏱️ Ending ${voiceSessions.size} active voice sessions...`);
-        for (const [userId] of voiceSessions) {
-            await endVoiceSession(userId);
+        if (voiceTimeTracker) {
+            await voiceTimeTracker.endAllSessions();
         }
         
         // Clean up voice connections
@@ -1097,7 +897,8 @@ async function gracefulShutdown() {
 // Keep the process alive and log status
 setInterval(() => {
     if (DEBUG) {
-        console.log(`🏴‍☠️ Bot Status - Guilds: ${client.guilds.cache.size}, Active Voice Sessions: ${voiceSessions.size}, Audio Connections: ${activeConnections.size}, Voice Logging: ${process.env.ENABLE_VOICE_LOGGING === 'true' ? 'ON' : 'OFF'}, Uptime: ${Math.floor(process.uptime()/60)}m`);
+        const activeSessions = voiceTimeTracker ? voiceTimeTracker.getActiveSessionsCount() : 0;
+        console.log(`🏴‍☠️ Bot Status - Guilds: ${client.guilds.cache.size}, Active Voice Sessions: ${activeSessions}, Audio Connections: ${activeConnections.size}, Uptime: ${Math.floor(process.uptime()/60)}m`);
     }
 }, 300000); // Log every 5 minutes in debug mode
 
@@ -1107,10 +908,14 @@ async function startBot() {
     log(`🔑 Discord Token: ${DISCORD_TOKEN ? '✅ Provided' : '❌ MISSING'}`);
     log(`🆔 Client ID: ${CLIENT_ID ? '✅ Provided' : '❌ MISSING'}`);
     log(`🗄️ Database URL: ${process.env.DATABASE_URL ? '✅ Provided' : '❌ MISSING'}`);
-    log(`🔍 Voice Logging: ${process.env.ENABLE_VOICE_LOGGING === 'true' ? '✅ Enabled' : '❌ Disabled'}`);
 
     if (!DISCORD_TOKEN) {
         console.error('❌ DISCORD_TOKEN is required! Please check your .env file.');
+        process.exit(1);
+    }
+
+    if (!CLIENT_ID) {
+        console.error('❌ CLIENT_ID is required for slash commands! Please check your .env file.');
         process.exit(1);
     }
 
