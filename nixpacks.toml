@@ -1,5 +1,5 @@
 [phases.setup]
-nixPkgs = ["nodejs_18", "ffmpeg", "python3", "libtool", "autoconf", "automake", "pkg-config", "libsodium"]
+nixPkgs = ["nodejs_18", "python3", "pkg-config"]
 
 [phases.install]
 cmds = [
