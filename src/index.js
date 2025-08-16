@@ -351,6 +351,7 @@ function trackAFKUser(userId, channelId, isAfk = false) {
 // Set up speaking detection for a voice channel
 async function setupSpeakingDetection(channelId) {
     if (speakingReceivers.has(channelId)) {
+        debugLog(`🎧 Speaking detection already exists for channel ${channelId}`);
         return; // Already set up
     }
     
@@ -360,6 +361,15 @@ async function setupSpeakingDetection(channelId) {
         
         const channel = guild.channels.cache.get(channelId);
         if (!channel || channel.type !== ChannelType.GuildVoice) return;
+        
+        // Check if channel has any users being tracked
+        const usersInChannel = Array.from(afkUsers.entries()).filter(([userId, data]) => data.channelId === channelId);
+        if (usersInChannel.length === 0) {
+            debugLog(`🤔 No tracked users in channel ${channelId}, skipping speaking detection`);
+            return;
+        }
+        
+        debugLog(`🎧 Setting up speaking detection for channel ${channel.name} (${usersInChannel.length} tracked users)`);
         
         // Create a voice connection for speaking detection
         const connection = joinVoiceChannel({
@@ -374,28 +384,29 @@ async function setupSpeakingDetection(channelId) {
             const receiver = connection.receiver;
             speakingReceivers.set(channelId, receiver);
             
-            debugLog(`🎧 Speaking detection ready for channel ${channelId}`);
+            log(`🎧 Speaking detection ACTIVE in ${channel.name} - monitoring ${usersInChannel.length} users`);
             
             // Listen for speaking events
             receiver.speaking.on('start', (userId) => {
                 updateUserActivity(userId);
-                debugLog(`🗣️ User ${userId} started speaking - activity updated`);
+                debugLog(`🗣️ User ${userId} started speaking in ${channel.name} - activity updated`);
             });
             
             receiver.speaking.on('end', (userId) => {
                 updateUserActivity(userId);
-                debugLog(`🤐 User ${userId} stopped speaking - activity updated`);
+                debugLog(`🤐 User ${userId} stopped speaking in ${channel.name} - activity updated`);
             });
         });
         
         connection.on(VoiceConnectionStatus.Disconnected, () => {
             speakingReceivers.delete(channelId);
-            debugLog(`🔌 Speaking detection disconnected from channel ${channelId}`);
+            log(`🔌 Speaking detection disconnected from ${channel.name}`);
         });
         
         connection.on('error', (error) => {
-            console.error(`❌ Speaking detection error for channel ${channelId}:`, error);
+            console.error(`❌ Speaking detection error for ${channel.name}:`, error);
             speakingReceivers.delete(channelId);
+            activeConnections.delete(`speaking_${channelId}`);
         });
         
         // Store connection for cleanup
@@ -403,6 +414,22 @@ async function setupSpeakingDetection(channelId) {
         
     } catch (error) {
         console.error(`❌ Error setting up speaking detection for channel ${channelId}:`, error);
+    }
+}
+
+// Check if a channel still needs speaking detection
+function shouldMaintainSpeakingDetection(channelId) {
+    const usersInChannel = Array.from(afkUsers.entries()).filter(([userId, data]) => data.channelId === channelId);
+    return usersInChannel.length > 0;
+}
+
+// Clean up speaking detection for channels with no tracked users
+function cleanupUnusedSpeakingDetection() {
+    for (const [channelId] of speakingReceivers.entries()) {
+        if (!shouldMaintainSpeakingDetection(channelId)) {
+            cleanupSpeakingDetection(channelId);
+            debugLog(`🧹 Cleaned up unused speaking detection for channel ${channelId}`);
+        }
     }
 }
 
@@ -780,7 +807,12 @@ client.once('ready', async () => {
         
         // Start AFK monitoring
         log('🏴‍☠️ AFK Manager: Started monitoring for inactive pirates...');
-        setInterval(checkAFKUsers, 60000); // Check every minute
+        
+        // Check AFK users every minute
+        setInterval(checkAFKUsers, 60000);
+        
+        // Clean up unused speaking detection every 5 minutes
+        setInterval(cleanupUnusedSpeakingDetection, 300000);
         
     } catch (error) {
         console.error('❌ Database initialization failed:', error);
@@ -801,6 +833,16 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
             // User left voice completely
             await endVoiceSession(userId);
             stopTrackingAFK(userId);
+            
+            // Clean up speaking detection if no one left in old channel
+            if (oldState.channel) {
+                setTimeout(() => {
+                    if (!shouldMaintainSpeakingDetection(oldState.channelId)) {
+                        cleanupSpeakingDetection(oldState.channelId);
+                    }
+                }, 5000); // Wait 5 seconds before cleanup
+            }
+            
             debugLog(`👤 ${member.displayName} left voice chat`);
         } else if (!oldState.channelId && newState.channelId) {
             // User joined voice
@@ -812,6 +854,14 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
             await endVoiceSession(userId);
             await startVoiceSession(userId, guildId, newState.channelId, newState.channel.name);
             trackAFKUser(userId, newState.channelId);
+            
+            // Clean up old channel if no one left
+            setTimeout(() => {
+                if (!shouldMaintainSpeakingDetection(oldState.channelId)) {
+                    cleanupSpeakingDetection(oldState.channelId);
+                }
+            }, 5000);
+            
             debugLog(`👤 ${member.displayName} moved from ${oldState.channel.name} to ${newState.channel.name}`);
         } else if (newState.channelId && oldState.channelId === newState.channelId) {
             // User's state changed (muted/deafened) while in same channel
