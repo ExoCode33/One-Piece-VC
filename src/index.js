@@ -8,7 +8,7 @@ require('dotenv').config();
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const CREATE_CHANNEL_NAME = process.env.CREATE_CHANNEL_NAME || '🏴〢Set Sail Together';
-const DEFAULT_CATEGORY_NAME = process.env.CATEGORY_NAME || '✘ SOCIAL ✘';
+const DEFAULT_CATEGORY_NAME = process.env.CATEGORY_NAME || '✘ 𝐕𝐨𝐢𝐜𝐞 𝐂𝐡𝐚𝐧𝐧𝐞𝐥𝐬 ✘';
 const DELETE_DELAY = parseInt(process.env.DELETE_DELAY) || 1000;
 const DEBUG = process.env.DEBUG === 'true';
 
@@ -742,8 +742,6 @@ client.on('messageCreate', async (message) => {
             } else {
                 message.reply('📊 No voice activity recorded in the last 30 days! Join some voice channels to start tracking your stats! 🎤');
             }
-        } catch (error) {
-            console.error('❌ Error getting voice stats:', error);
         } catch (error) {
             console.error('❌ Error getting voice stats:', error);
             message.reply('❌ Error retrieving voice stats. Please try again later.');
