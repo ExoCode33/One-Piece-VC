@@ -9,6 +9,7 @@ const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const CREATE_CHANNEL_NAME = process.env.CREATE_CHANNEL_NAME || '🏴〢Set Sail Together';
 const DEFAULT_CATEGORY_NAME = process.env.CATEGORY_NAME || '✘ 𝐕𝐨𝐢𝐜𝐞 𝐂𝐡𝐚𝐧𝐧𝐞𝐥𝐬 ✘';
+const CATEGORY_ID = process.env.CATEGORY_ID; // Direct category ID override
 const DELETE_DELAY = parseInt(process.env.DELETE_DELAY) || 1000;
 const DEBUG = process.env.DEBUG === 'true';
 
@@ -506,6 +507,12 @@ client.once('ready', async () => {
     log(`🛡️ AFK Protection: ${AFK_EXCLUDED_CHANNELS.join(', ')}`);
     log(`⏰ AFK Timeout: ${AFK_TIMEOUT / 60000} minutes`);
     
+    if (CATEGORY_ID) {
+        log(`🎯 Using direct category ID: ${CATEGORY_ID}`);
+    } else {
+        log(`📁 Using dynamic category management`);
+    }
+    
     try {
         // Initialize database connection and create database if needed
         await initializeConnection();
@@ -573,38 +580,54 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
                 return;
             }
             
-            // Get saved category or use default
-            let savedCategory = await getCategoryForGuild(guildId);
             let category;
             
-            if (savedCategory) {
-                // Try to find the saved category by ID first
-                category = guild.channels.cache.get(savedCategory.categoryId);
-                if (!category) {
-                    // Saved category doesn't exist anymore, find by name
-                    category = guild.channels.cache.find(c => 
-                        c.name === savedCategory.categoryName && c.type === ChannelType.GuildCategory
-                    );
-                    
-                    if (category) {
-                        // Update the database with the new category ID
-                        await updateCategoryForGuild(guildId, category.id, category.name);
-                        log(`🔄 Category ID updated: ${savedCategory.categoryName}`);
-                    }
+            // If CATEGORY_ID is provided, use it directly
+            if (CATEGORY_ID) {
+                category = guild.channels.cache.get(CATEGORY_ID);
+                if (category) {
+                    debugLog(`✅ Using direct category ID: ${CATEGORY_ID} (${category.name})`);
+                    // Save/update this category in database
+                    await updateCategoryForGuild(guildId, category.id, category.name);
+                } else {
+                    console.error(`❌ Category with ID ${CATEGORY_ID} not found! Creating fallback category.`);
                 }
             }
             
+            // If no direct category ID or category not found, use saved/default logic
             if (!category) {
-                // Create new category with default name
-                debugLog(`Category not found, creating new one: ${DEFAULT_CATEGORY_NAME}`);
-                category = await guild.channels.create({
-                    name: DEFAULT_CATEGORY_NAME,
-                    type: ChannelType.GuildCategory,
-                });
+                // Get saved category or use default
+                let savedCategory = await getCategoryForGuild(guildId);
                 
-                // Save the new category to database
-                await updateCategoryForGuild(guildId, category.id, category.name);
-                log(`📁 Created and saved new category: ${DEFAULT_CATEGORY_NAME}`);
+                if (savedCategory) {
+                    // Try to find the saved category by ID first
+                    category = guild.channels.cache.get(savedCategory.categoryId);
+                    if (!category) {
+                        // Saved category doesn't exist anymore, find by name
+                        category = guild.channels.cache.find(c => 
+                            c.name === savedCategory.categoryName && c.type === ChannelType.GuildCategory
+                        );
+                        
+                        if (category) {
+                            // Update the database with the new category ID
+                            await updateCategoryForGuild(guildId, category.id, category.name);
+                            log(`🔄 Category ID updated: ${savedCategory.categoryName}`);
+                        }
+                    }
+                }
+                
+                if (!category) {
+                    // Create new category with default name
+                    debugLog(`Category not found, creating new one: ${DEFAULT_CATEGORY_NAME}`);
+                    category = await guild.channels.create({
+                        name: DEFAULT_CATEGORY_NAME,
+                        type: ChannelType.GuildCategory,
+                    });
+                    
+                    // Save the new category to database
+                    await updateCategoryForGuild(guildId, category.id, category.name);
+                    log(`📁 Created and saved new category: ${DEFAULT_CATEGORY_NAME}`);
+                }
             }
 
             const crewName = getRandomCrewName();
