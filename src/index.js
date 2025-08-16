@@ -277,4 +277,636 @@ async function endVoiceSession(userId) {
             return;
         }
         
-        const
+        const duration = Math.floor((new Date() - session.joinTime) / 1000); // Duration in seconds
+        
+        await pool.query(`
+            UPDATE voice_time_tracking 
+            SET leave_time = CURRENT_TIMESTAMP, duration_seconds = $1
+            WHERE id = $2
+        `, [duration, session.sessionId]);
+        
+        voiceSessions.delete(userId);
+        
+        debugLog(`🎤 Ended voice session for user ${userId}. Duration: ${duration} seconds`);
+        log(`⏱️ Voice session ended: ${Math.floor(duration / 60)}m ${duration % 60}s in ${session.channelName}`);
+    } catch (error) {
+        console.error('❌ Error ending voice session:', error);
+    }
+}
+
+async function getUserVoiceStats(userId, guildId, days = 30) {
+    try {
+        const result = await pool.query(`
+            SELECT 
+                COUNT(*) as session_count,
+                SUM(duration_seconds) as total_seconds,
+                AVG(duration_seconds) as avg_seconds,
+                MAX(duration_seconds) as longest_seconds
+            FROM voice_time_tracking 
+            WHERE user_id = $1 
+                AND guild_id = $2 
+                AND join_time >= CURRENT_TIMESTAMP - INTERVAL '${days} days'
+                AND duration_seconds IS NOT NULL
+        `, [userId, guildId]);
+        
+        return result.rows[0];
+    } catch (error) {
+        console.error('❌ Error getting user voice stats:', error);
+        return null;
+    }
+}
+
+// AFK Management Functions
+function isUserAFK(voiceState) {
+    // Consider user AFK if they are self-deafened or self-muted
+    return voiceState.selfDeaf || voiceState.selfMute;
+}
+
+function trackAFKUser(userId, channelId, isAfk) {
+    afkUsers.set(userId, {
+        channelId: channelId,
+        startTime: isAfk ? Date.now() : null,
+        isAfk: isAfk
+    });
+    
+    if (DEBUG) {
+        debugLog(`👁️ Now tracking AFK status for user ${userId} in channel ${channelId} (AFK: ${isAfk})`);
+    }
+}
+
+function updateAFKStatus(userId, channelId, isAfk) {
+    const userData = afkUsers.get(userId);
+    if (userData) {
+        userData.channelId = channelId;
+        userData.isAfk = isAfk;
+        userData.startTime = isAfk ? Date.now() : null;
+        
+        if (DEBUG) {
+            debugLog(`🔄 Updated AFK status for user ${userId}: ${isAfk ? 'AFK' : 'Active'}`);
+        }
+    }
+}
+
+function stopTrackingAFK(userId) {
+    afkUsers.delete(userId);
+    if (DEBUG) {
+        debugLog(`👋 Stopped tracking AFK for user ${userId}`);
+    }
+}
+
+function isChannelExcluded(channelName) {
+    return AFK_EXCLUDED_CHANNELS.some(excludedName => 
+        channelName.toLowerCase().includes(excludedName.toLowerCase()) ||
+        excludedName.toLowerCase().includes(channelName.toLowerCase())
+    );
+}
+
+async function checkAFKUsers() {
+    const now = Date.now();
+    const usersToDisconnect = [];
+
+    for (const [userId, userData] of afkUsers.entries()) {
+        if (!userData.isAfk || !userData.startTime) continue;
+
+        const afkDuration = now - userData.startTime;
+        
+        if (afkDuration >= AFK_TIMEOUT) {
+            try {
+                const guild = client.guilds.cache.first(); // Assuming single guild for now
+                if (!guild) continue;
+                
+                const member = await guild.members.fetch(userId);
+                const channel = guild.channels.cache.get(userData.channelId);
+                
+                if (member && member.voice.channel && channel) {
+                    // Check if user is in an excluded channel
+                    if (isChannelExcluded(channel.name)) {
+                        if (DEBUG) {
+                            debugLog(`🛡️ User ${member.displayName} is in protected channel: ${channel.name}`);
+                        }
+                        continue;
+                    }
+                    
+                    usersToDisconnect.push({ member, channel, afkDuration });
+                }
+            } catch (error) {
+                console.error(`❌ Error checking AFK user ${userId}:`, error);
+                stopTrackingAFK(userId);
+            }
+        }
+    }
+
+    // Disconnect AFK users
+    for (const { member, channel, afkDuration } of usersToDisconnect) {
+        await disconnectAFKUser(member, channel, afkDuration);
+    }
+}
+
+async function disconnectAFKUser(member, channel, afkDuration) {
+    try {
+        // Disconnect the user
+        await member.voice.disconnect('AFK timeout');
+        stopTrackingAFK(member.id);
+        
+        // Get random disconnect message
+        const randomMessage = onePieceDisconnectMessages[
+            Math.floor(Math.random() * onePieceDisconnectMessages.length)
+        ].replace('{user}', member.displayName);
+        
+        // Send notification to a general channel if available
+        const guild = member.guild;
+        const generalChannel = guild.channels.cache.find(ch => 
+            ch.type === 0 && (ch.name.includes('general') || ch.name.includes('chat'))
+        );
+        
+        if (generalChannel) {
+            const embed = {
+                color: 0xFF6B6B,
+                title: '⚓ Crew Member Lost at Sea!',
+                description: randomMessage,
+                fields: [
+                    { name: '🏴‍☠️ Former Location', value: channel.name, inline: true },
+                    { name: '⏰ AFK Duration', value: `${Math.floor(afkDuration / 60000)} minutes`, inline: true }
+                ],
+                footer: { text: 'Return when you\'re ready to set sail again!' },
+                timestamp: new Date().toISOString()
+            };
+
+            await generalChannel.send({ embeds: [embed] });
+        }
+        
+        log(`🌊 Disconnected AFK user: ${member.displayName} from ${channel.name} (AFK for ${Math.floor(afkDuration / 60000)} minutes)`);
+        
+    } catch (error) {
+        console.error(`❌ Error disconnecting AFK user ${member.displayName}:`, error);
+    }
+}
+
+// Function to sync channel permissions with category
+async function syncChannelWithCategory(channel, category, creatorId) {
+    try {
+        // Get category permission overwrites
+        const categoryPermissions = category.permissionOverwrites.cache;
+        
+        // Create permission overwrites array for the new channel
+        const channelPermissions = [];
+        
+        // Copy all category permissions
+        categoryPermissions.forEach((overwrite) => {
+            channelPermissions.push({
+                id: overwrite.id,
+                allow: overwrite.allow,
+                deny: overwrite.deny,
+                type: overwrite.type
+            });
+        });
+        
+        // Add creator permissions (captain of the crew)
+        const creatorPermissionExists = channelPermissions.find(perm => perm.id === creatorId);
+        if (creatorPermissionExists) {
+            // Merge with existing permissions
+            creatorPermissionExists.allow = creatorPermissionExists.allow.add([
+                PermissionFlagsBits.ManageChannels,
+                PermissionFlagsBits.MoveMembers,
+                PermissionFlagsBits.MuteMembers,
+                PermissionFlagsBits.DeafenMembers
+            ]);
+        } else {
+            // Add new creator permissions
+            channelPermissions.push({
+                id: creatorId,
+                allow: [
+                    PermissionFlagsBits.ViewChannel,
+                    PermissionFlagsBits.Connect,
+                    PermissionFlagsBits.ManageChannels,
+                    PermissionFlagsBits.MoveMembers,
+                    PermissionFlagsBits.MuteMembers,
+                    PermissionFlagsBits.DeafenMembers
+                ],
+                type: 1 // Member type
+            });
+        }
+        
+        // Apply permissions to the channel
+        await channel.permissionOverwrites.set(channelPermissions);
+        
+        debugLog(`🔐 Synced permissions for ${channel.name} with category ${category.name}`);
+        debugLog(`👑 Granted captain permissions to creator ${creatorId}`);
+        
+    } catch (error) {
+        console.error('❌ Error syncing channel permissions:', error);
+    }
+}
+
+// Bot event handlers
+client.once('ready', async () => {
+    log(`One Piece Dynamic Voice Bot is ready to set sail!`);
+    log(`⚓ Logged in as ${client.user.tag}`);
+    log(`🏴‍☠️ Serving ${client.guilds.cache.size} server(s)`);
+    log(`🛡️ AFK Protection: ${AFK_EXCLUDED_CHANNELS.join(', ')}`);
+    log(`⏰ AFK Timeout: ${AFK_TIMEOUT / 60000} minutes`);
+    
+    try {
+        // Initialize database connection and create database if needed
+        await initializeConnection();
+        
+        // Initialize database tables
+        await initializeDatabase();
+        
+        // Test database connection
+        const result = await pool.query('SELECT NOW()');
+        log(`⏰ Database time: ${result.rows[0].now}`);
+        log('🗄️ Database connection test successful!');
+        
+        // Start AFK monitoring
+        log('🏴‍☠️ AFK Manager: Started monitoring for inactive pirates...');
+        setInterval(checkAFKUsers, 60000); // Check every minute
+        
+    } catch (error) {
+        console.error('❌ Database initialization failed:', error);
+        console.error('❌ Bot will shut down due to database error');
+        process.exit(1);
+    }
+});
+
+// Voice state update handler
+client.on('voiceStateUpdate', async (oldState, newState) => {
+    const userId = newState.id;
+    const member = newState.member;
+    const guildId = newState.guild.id;
+
+    try {
+        // Handle voice session tracking
+        if (oldState.channelId && !newState.channelId) {
+            // User left voice completely
+            await endVoiceSession(userId);
+            stopTrackingAFK(userId);
+            debugLog(`👤 ${member.displayName} left voice chat`);
+        } else if (!oldState.channelId && newState.channelId) {
+            // User joined voice
+            await startVoiceSession(userId, guildId, newState.channelId, newState.channel.name);
+            trackAFKUser(userId, newState.channelId, isUserAFK(newState));
+            debugLog(`👤 ${member.displayName} joined ${newState.channel.name}`);
+        } else if (oldState.channelId && newState.channelId && oldState.channelId !== newState.channelId) {
+            // User moved between channels
+            await endVoiceSession(userId);
+            await startVoiceSession(userId, guildId, newState.channelId, newState.channel.name);
+            trackAFKUser(userId, newState.channelId, isUserAFK(newState));
+            debugLog(`👤 ${member.displayName} moved from ${oldState.channel.name} to ${newState.channel.name}`);
+        } else if (newState.channelId) {
+            // User's state changed (muted/deafened) while in same channel
+            const wasAfk = isUserAFK(oldState);
+            const isAfk = isUserAFK(newState);
+            
+            if (wasAfk !== isAfk) {
+                updateAFKStatus(userId, newState.channelId, isAfk);
+                debugLog(`🔄 AFK status changed for ${member.displayName}: ${isAfk ? 'AFK' : 'Active'}`);
+            }
+        }
+
+        // Dynamic Voice Channel Creation
+        if (newState.channelId && newState.channel?.name === CREATE_CHANNEL_NAME) {
+            const guild = newState.guild;
+            
+            if (!member.voice.channelId) {
+                debugLog(`User ${member.displayName} no longer in voice, skipping channel creation`);
+                return;
+            }
+            
+            // Get saved category or use default
+            let savedCategory = await getCategoryForGuild(guildId);
+            let category;
+            
+            if (savedCategory) {
+                // Try to find the saved category by ID first
+                category = guild.channels.cache.get(savedCategory.categoryId);
+                if (!category) {
+                    // Saved category doesn't exist anymore, find by name
+                    category = guild.channels.cache.find(c => 
+                        c.name === savedCategory.categoryName && c.type === ChannelType.GuildCategory
+                    );
+                    
+                    if (category) {
+                        // Update the database with the new category ID
+                        await updateCategoryForGuild(guildId, category.id, category.name);
+                        log(`🔄 Category ID updated: ${savedCategory.categoryName}`);
+                    }
+                }
+            }
+            
+            if (!category) {
+                // Create new category with default name
+                debugLog(`Category not found, creating new one: ${DEFAULT_CATEGORY_NAME}`);
+                category = await guild.channels.create({
+                    name: DEFAULT_CATEGORY_NAME,
+                    type: ChannelType.GuildCategory,
+                });
+                
+                // Save the new category to database
+                await updateCategoryForGuild(guildId, category.id, category.name);
+                log(`📁 Created and saved new category: ${DEFAULT_CATEGORY_NAME}`);
+            }
+
+            const crewName = getRandomCrewName();
+            
+            // Create the new voice channel with basic setup first
+            const newChannel = await guild.channels.create({
+                name: crewName,
+                type: ChannelType.GuildVoice,
+                parent: category.id,
+            });
+
+            // Sync permissions with category and add creator permissions
+            await syncChannelWithCategory(newChannel, category, member.id);
+
+            // Ensure channel is in the correct category
+            if (newChannel.parentId !== category.id) {
+                try {
+                    await newChannel.setParent(category.id);
+                    debugLog(`🔧 Manually moved ${crewName} to category ${category.name}`);
+                } catch (moveError) {
+                    console.error(`❌ Error moving channel to category:`, moveError);
+                }
+            }
+
+            log(`🚢 Created new crew: ${crewName} for ${member.displayName}`);
+            log(`👑 ${member.displayName} is now captain of ${crewName}`);
+
+            try {
+                if (member.voice.channelId) {
+                    await member.voice.setChannel(newChannel);
+                    debugLog(`✅ Successfully moved ${member.displayName} to ${crewName}`);
+                } else {
+                    debugLog(`User ${member.displayName} disconnected before move, cleaning up channel`);
+                    setTimeout(async () => {
+                        try {
+                            if (newChannel.members.size === 0) {
+                                await newChannel.delete();
+                                debugLog(`🗑️ Cleaned up unused crew: ${crewName}`);
+                            }
+                        } catch (cleanupError) {
+                            console.error(`❌ Error cleaning up channel:`, cleanupError);
+                        }
+                    }, 1000);
+                }
+            } catch (moveError) {
+                console.error(`❌ Error moving user to new channel:`, moveError);
+                setTimeout(async () => {
+                    try {
+                        if (newChannel.members.size === 0) {
+                            await newChannel.delete();
+                            debugLog(`🗑️ Cleaned up failed crew: ${crewName}`);
+                        }
+                    } catch (cleanupError) {
+                        console.error(`❌ Error cleaning up channel:`, cleanupError);
+                    }
+                }, 1000);
+            }
+        }
+
+        // Auto-delete empty dynamic channels
+        if (oldState.channelId) {
+            const oldChannel = oldState.channel;
+            const savedCategory = await getCategoryForGuild(guildId);
+            const categoryName = savedCategory ? savedCategory.categoryName : DEFAULT_CATEGORY_NAME;
+            
+            if (oldChannel && 
+                oldChannel.name !== CREATE_CHANNEL_NAME && 
+                oldChannel.parent?.name === categoryName &&
+                oldChannel.members.size === 0) {
+                
+                debugLog(`🕐 Scheduling deletion of empty crew: ${oldChannel.name} in ${DELETE_DELAY}ms`);
+                
+                setTimeout(async () => {
+                    try {
+                        const channelToDelete = oldChannel.guild.channels.cache.get(oldChannel.id);
+                        if (channelToDelete && channelToDelete.members.size === 0) {
+                            await channelToDelete.delete();
+                            log(`🗑️ Deleted empty crew: ${oldChannel.name}`);
+                        } else {
+                            debugLog(`👥 Crew ${oldChannel.name} no longer empty, keeping it`);
+                        }
+                    } catch (error) {
+                        console.error(`❌ Error deleting channel ${oldChannel.name}:`, error);
+                    }
+                }, DELETE_DELAY);
+            }
+        }
+
+    } catch (error) {
+        console.error('❌ Error in voiceStateUpdate:', error);
+    }
+});
+
+// Handle category moves - sync to database when category is moved/renamed
+client.on('channelUpdate', async (oldChannel, newChannel) => {
+    try {
+        // Check if this is a category update
+        if (newChannel.type === ChannelType.GuildCategory) {
+            const guildId = newChannel.guild.id;
+            const savedCategory = await getCategoryForGuild(guildId);
+            
+            // If this is our saved category and it was moved/renamed
+            if (savedCategory && savedCategory.categoryId === newChannel.id) {
+                if (savedCategory.categoryName !== newChannel.name) {
+                    await updateCategoryForGuild(guildId, newChannel.id, newChannel.name);
+                    log(`📁 Category renamed and synced: ${savedCategory.categoryName} → ${newChannel.name}`);
+                }
+            }
+        }
+    } catch (error) {
+        console.error('❌ Error handling category update:', error);
+    }
+});
+
+// Message commands for voice stats and bot management
+client.on('messageCreate', async (message) => {
+    if (message.author.bot) return;
+    
+    // Voice stats command
+    if (message.content === '!voicestats' || message.content === '!stats') {
+        try {
+            const stats = await getUserVoiceStats(message.author.id, message.guild.id);
+            if (stats && stats.total_seconds > 0) {
+                const totalHours = Math.floor(stats.total_seconds / 3600);
+                const totalMinutes = Math.floor((stats.total_seconds % 3600) / 60);
+                const avgMinutes = Math.floor(stats.avg_seconds / 60);
+                const longestHours = Math.floor(stats.longest_seconds / 3600);
+                const longestMinutes = Math.floor((stats.longest_seconds % 3600) / 60);
+                
+                message.reply(`📊 **${message.author.displayName}'s Voice Stats (Last 30 days)**\n` +
+                    `🎤 **Sessions:** ${stats.session_count}\n` +
+                    `⏱️ **Total Time:** ${totalHours}h ${totalMinutes}m\n` +
+                    `📈 **Average Session:** ${avgMinutes}m\n` +
+                    `🏆 **Longest Session:** ${longestHours}h ${longestMinutes}m`);
+            } else {
+                message.reply('📊 No voice activity recorded in the last 30 days! Join some voice channels to start tracking your stats! 🎤');
+            }
+        } catch (error) {
+            console.error('❌ Error getting voice stats:', error);
+        } catch (error) {
+            console.error('❌ Error getting voice stats:', error);
+            message.reply('❌ Error retrieving voice stats. Please try again later.');
+        }
+    }
+    
+    // Ping command
+    if (message.content === '!ping') {
+        const ping = Date.now() - message.createdTimestamp;
+        message.reply(`🏴‍☠️ **Pong!** 
+📡 Bot Latency: \`${ping}ms\`
+💓 API Latency: \`${Math.round(client.ws.ping)}ms\`
+⚓ Ready to set sail!`);
+    }
+    
+    // Bot info command
+    if (message.content === '!botinfo') {
+        const uptime = process.uptime();
+        const hours = Math.floor(uptime / 3600);
+        const minutes = Math.floor((uptime % 3600) / 60);
+        
+        message.reply(`🏴‍☠️ **One Piece Voice Bot Info**
+⚓ **Servers:** ${client.guilds.cache.size}
+👤 **Active Voice Sessions:** ${voiceSessions.size}
+😴 **AFK Users Tracked:** ${afkUsers.size}
+⏰ **Uptime:** ${hours}h ${minutes}m
+🗄️ **Database:** Connected
+🎤 **Features:** Dynamic Voice Channels, Voice Time Tracking, AFK Management`);
+    }
+    
+    // AFK stats command
+    if (message.content === '!afkstats') {
+        try {
+            const totalTracked = afkUsers.size;
+            const currentlyAFK = Array.from(afkUsers.values()).filter(user => user.isAfk).length;
+            
+            message.reply(`📊 **AFK System Stats**
+👁️ **Users Tracked:** ${totalTracked}
+😴 **Currently AFK:** ${currentlyAFK}
+⏰ **AFK Timeout:** ${AFK_TIMEOUT / 60000} minutes
+🛡️ **Protected Channels:** ${AFK_EXCLUDED_CHANNELS.join(', ')}`);
+        } catch (error) {
+            console.error('❌ Error getting AFK stats:', error);
+            message.reply('❌ Error retrieving AFK stats.');
+        }
+    }
+    
+    // Help command
+    if (message.content === '!help') {
+        message.reply(`🏴‍☠️ **One Piece Voice Bot Commands**
+
+**📊 Voice Tracking:**
+\`!voicestats\` or \`!stats\` - View your voice activity stats
+\`!afkstats\` - View AFK system statistics
+\`!ping\` - Check bot latency
+\`!botinfo\` - View bot information
+\`!help\` - Show this help message
+
+**🚢 How to Use:**
+1. Join "${CREATE_CHANNEL_NAME}" voice channel
+2. Bot will create a new crew with a One Piece themed name
+3. You become the captain with full channel permissions
+4. Empty crews are automatically deleted after ${DELETE_DELAY/1000} seconds
+5. Your voice time is automatically tracked!
+
+**😴 AFK Management:**
+• Users who are AFK (muted/deafened) for ${AFK_TIMEOUT/60000} minutes get disconnected
+• Protected channels: ${AFK_EXCLUDED_CHANNELS.join(', ')}
+• Themed disconnect messages for immersion
+
+**🎯 Features:**
+• Dynamic voice channel creation
+• Auto-synced category permissions
+• Voice time tracking with PostgreSQL
+• Captain permissions for channel creators
+• Automatic cleanup of empty channels
+• AFK user management with One Piece themes`);
+    }
+});
+
+// Error handling
+client.on('error', error => {
+    console.error('❌ Discord client error:', error);
+});
+
+client.on('warn', warning => {
+    console.warn('⚠️ Discord client warning:', warning);
+});
+
+process.on('unhandledRejection', error => {
+    console.error('❌ Unhandled promise rejection:', error);
+});
+
+process.on('uncaughtException', error => {
+    console.error('❌ Uncaught exception:', error);
+    process.exit(1);
+});
+
+process.on('SIGINT', gracefulShutdown);
+process.on('SIGTERM', gracefulShutdown);
+
+async function gracefulShutdown() {
+    log('🛑 Shutting down bot gracefully...');
+    
+    try {
+        // End all active voice sessions
+        log(`⏱️ Ending ${voiceSessions.size} active voice sessions...`);
+        for (const [userId] of voiceSessions) {
+            await endVoiceSession(userId);
+        }
+        
+        // Clear AFK tracking
+        log(`😴 Clearing ${afkUsers.size} AFK tracking sessions...`);
+        afkUsers.clear();
+        
+        // Close database connection
+        log('🗄️ Closing database connection...');
+        if (pool) {
+            await pool.end();
+        }
+        
+        // Destroy Discord client
+        client.destroy();
+        
+        log('👋 Bot shutdown complete!');
+    } catch (error) {
+        console.error('❌ Error during shutdown:', error);
+    }
+    
+    process.exit(0);
+}
+
+// Keep the process alive and log status
+setInterval(() => {
+    if (DEBUG) {
+        console.log(`🏴‍☠️ Bot Status - Guilds: ${client.guilds.cache.size}, Active Voice Sessions: ${voiceSessions.size}, AFK Tracked: ${afkUsers.size}, Uptime: ${Math.floor(process.uptime()/60)}m`);
+    }
+}, 300000); // Log every 5 minutes in debug mode
+
+// Start the bot
+async function startBot() {
+    log('🚀 Starting One Piece Dynamic Voice Bot...');
+    log(`🔑 Discord Token: ${DISCORD_TOKEN ? '✅ Provided' : '❌ MISSING'}`);
+    log(`🆔 Client ID: ${CLIENT_ID ? '✅ Provided' : '❌ MISSING'}`);
+    log(`🗄️ Database URL: ${process.env.DATABASE_URL ? '✅ Provided' : '❌ MISSING'}`);
+
+    if (!DISCORD_TOKEN) {
+        console.error('❌ DISCORD_TOKEN is required! Please check your .env file.');
+        process.exit(1);
+    }
+
+    if (!process.env.DATABASE_URL) {
+        console.error('❌ DATABASE_URL is required! Please check your .env file.');
+        process.exit(1);
+    }
+
+    try {
+        await client.login(DISCORD_TOKEN);
+    } catch (error) {
+        console.error('❌ Failed to login to Discord:', error);
+        process.exit(1);
+    }
+}
+
+// Start the bot
+startBot();
