@@ -3,6 +3,7 @@ const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerSta
 const { Pool } = require('pg');
 const fs = require('fs');
 const path = require('path');
+const VoiceActivityLogger = require('./voiceActivityLogger');
 
 // Load environment variables
 require('dotenv').config();
@@ -11,7 +12,7 @@ require('dotenv').config();
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const CREATE_CHANNEL_NAME = process.env.CREATE_CHANNEL_NAME || '🏴〢Set Sail Together';
-const DEFAULT_CATEGORY_NAME = process.env.CATEGORY_NAME || '✘ 𝐕𝐨𝐢𝐜𝐞 𝐂𝐡𝐚𝐧𝐧𝐞𝐥𝐬 ✘';
+const DEFAULT_CATEGORY_NAME = process.env.CATEGORY_NAME || '✘ SOCIAL ✘';
 const CATEGORY_ID = process.env.CATEGORY_ID; // Direct category ID override
 const DELETE_DELAY = parseInt(process.env.DELETE_DELAY) || 1000;
 const DEBUG = process.env.DEBUG === 'true';
@@ -21,6 +22,7 @@ const AUDIO_VOLUME = parseFloat(process.env.AUDIO_VOLUME) || 0.4;
 
 // PostgreSQL connection with auto-database creation
 let pool;
+let voiceLogger;
 
 async function initializeConnection() {
     const databaseUrl = process.env.DATABASE_URL;
@@ -518,6 +520,12 @@ client.once('ready', async () => {
         // Initialize database tables
         await initializeDatabase();
         
+        // Initialize voice activity logger
+        voiceLogger = new VoiceActivityLogger(client, pool);
+        if (process.env.ENABLE_VOICE_LOGGING === 'true') {
+            log(`🔍 Voice Activity Logger enabled - Target channel: ${process.env.VOICE_LOG_CHANNEL || 'voice-activity-log'}`);
+        }
+        
         // Test database connection
         const result = await pool.query('SELECT NOW()');
         log(`⏰ Database time: ${result.rows[0].now}`);
@@ -562,6 +570,11 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
     const guildId = newState.guild.id;
 
     try {
+        // Add voice activity logging
+        if (voiceLogger) {
+            await voiceLogger.handleVoiceStateUpdate(oldState, newState);
+        }
+
         // Handle voice session tracking
         if (oldState.channelId && !newState.channelId) {
             // User left voice completely
@@ -731,7 +744,6 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
                         } else {
                             debugLog(`👥 Crew ${oldChannel.name} no longer empty, keeping it`);
                         }
-                    } catch (error) {
                         console.error(`❌ Error deleting channel ${oldChannel.name}:`, error);
                     }
                 }, DELETE_DELAY);
@@ -793,6 +805,125 @@ client.on('messageCreate', async (message) => {
         }
     }
     
+    // Voice activity logs command
+    if (message.content === '!voicelogs' || message.content.startsWith('!voicelogs ')) {
+        if (!message.member.permissions.has(PermissionFlagsBits.ManageChannels)) {
+            return message.reply('❌ You need Manage Channels permission to view voice logs!');
+        }
+
+        try {
+            const args = message.content.split(' ');
+            const limit = args[1] ? parseInt(args[1]) : 20;
+            
+            if (limit > 100) {
+                return message.reply('❌ Maximum limit is 100 logs!');
+            }
+
+            const logs = await voiceLogger.getRecentLogs(message.guild.id, limit);
+            
+            if (logs.length === 0) {
+                return message.reply('📝 No voice activity logs found!');
+            }
+
+            const logText = logs.map(log => {
+                const time = new Date(log.timestamp).toLocaleString();
+                const action = log.action;
+                const channel = log.channel_name || 'Unknown';
+                return `\`${time}\` **${log.username}** ${action} ${channel}`;
+            }).join('\n');
+
+            // Split into multiple messages if too long
+            const chunks = logText.match(/.{1,1900}/g) || [logText];
+            
+            for (let i = 0; i < chunks.length; i++) {
+                await message.reply(`📋 **Voice Activity Logs (${logs.length} entries)** ${i > 0 ? `(Part ${i+1})` : ''}\n${chunks[i]}`);
+            }
+        } catch (error) {
+            console.error('❌ Error getting voice logs:', error);
+            message.reply('❌ Error retrieving voice logs. Please try again later.');
+        }
+    }
+
+    // User voice activity stats command
+    if (message.content.startsWith('!voiceactivity ') || message.content === '!voiceactivity') {
+        try {
+            let targetUser = message.author;
+            
+            // Check if user mentioned someone else
+            if (message.mentions.users.size > 0) {
+                targetUser = message.mentions.users.first();
+            }
+
+            const stats = await voiceLogger.getUserActivityStats(targetUser.id, message.guild.id, 7);
+            
+            if (stats.length === 0) {
+                return message.reply(`📊 No voice activity found for ${targetUser.displayName} in the last 7 days!`);
+            }
+
+            // Group stats by action
+            const actionCounts = {};
+            stats.forEach(stat => {
+                actionCounts[stat.action] = (actionCounts[stat.action] || 0) + parseInt(stat.count);
+            });
+
+            let statsText = `📊 **${targetUser.displayName}'s Voice Activity (Last 7 days)**\n`;
+            Object.entries(actionCounts).forEach(([action, count]) => {
+                const emoji = {
+                    'JOIN': '🎤',
+                    'LEAVE': '👋',
+                    'MOVE': '🔄',
+                    'MUTE': '🔇',
+                    'UNMUTE': '🔊'
+                }[action] || '❓';
+                
+                statsText += `${emoji} **${action}:** ${count}\n`;
+            });
+
+            message.reply(statsText);
+        } catch (error) {
+            console.error('❌ Error getting voice activity stats:', error);
+            message.reply('❌ Error retrieving voice activity stats. Please try again later.');
+        }
+    }
+
+    // Command to create voice log channel
+    if (message.content === '!createvoicelog') {
+        if (!message.member.permissions.has(PermissionFlagsBits.ManageChannels)) {
+            return message.reply('❌ You need Manage Channels permission to create the voice log channel!');
+        }
+
+        const channelName = process.env.VOICE_LOG_CHANNEL || 'voice-activity-log';
+        
+        // Check if channel already exists
+        const existingChannel = message.guild.channels.cache.find(channel => 
+            channel.name === channelName && channel.type === 0
+        );
+
+        if (existingChannel) {
+            return message.reply(`✅ Voice log channel already exists: ${existingChannel}`);
+        }
+
+        try {
+            const newChannel = await message.guild.channels.create({
+                name: channelName,
+                type: 0, // Text channel
+                topic: 'Automatic voice activity logging - Join/Leave/Move events',
+                permissionOverwrites: [
+                    {
+                        id: message.guild.id, // @everyone
+                        deny: [PermissionFlagsBits.SendMessages], // Only allow viewing, not sending
+                        allow: [PermissionFlagsBits.ViewChannel]
+                    }
+                ]
+            });
+
+            message.reply(`✅ Created voice log channel: ${newChannel}\n🔍 Voice activity will now be logged here!`);
+        } catch (error) {
+            console.error('❌ Error creating voice log channel:', error);
+            message.reply('❌ Error creating voice log channel. Please check bot permissions.');
+        }
+    }
+    
     // Ping command
     if (message.content === '!ping') {
         const ping = Date.now() - message.createdTimestamp;
@@ -814,7 +945,8 @@ client.on('messageCreate', async (message) => {
 🎵 **Active Audio Connections:** ${activeConnections.size}
 ⏰ **Uptime:** ${hours}h ${minutes}m
 🗄️ **Database:** Connected
-🎤 **Features:** Dynamic Voice Channels, Voice Time Tracking, Welcome Sounds`);
+🔍 **Voice Logging:** ${process.env.ENABLE_VOICE_LOGGING === 'true' ? 'Enabled' : 'Disabled'}
+🎤 **Features:** Dynamic Voice Channels, Voice Time Tracking, Welcome Sounds, Activity Logging`);
     }
     
     // Fast sound test command for speed testing
@@ -836,6 +968,7 @@ client.on('messageCreate', async (message) => {
             }, 3000);
         });
     }
+    
     if (message.content === '!testsound') {
         if (!message.member.voice.channel) {
             return message.reply('❌ You need to be in a voice channel to test the sound!');
@@ -865,7 +998,10 @@ client.on('messageCreate', async (message) => {
         message.reply(`🏴‍☠️ **One Piece Voice Bot Commands**
 
 **📊 Voice Tracking:**
-\`!voicestats\` or \`!stats\` - View your voice activity stats
+\`!voicestats\` or \`!stats\` - View your voice activity stats (last 30 days)
+\`!voiceactivity [@user]\` - View voice activity stats for a user (last 7 days)
+\`!voicelogs [limit]\` - View recent voice activity logs (requires Manage Channels)
+\`!createvoicelog\` - Create voice activity log channel (requires Manage Channels)
 \`!ping\` - Check bot latency
 \`!botinfo\` - View bot information
 \`!help\` - Show this help message
@@ -881,15 +1017,20 @@ client.on('messageCreate', async (message) => {
 3. You become the captain with full channel permissions
 4. Bot plays welcome sound (if file exists)
 5. Empty crews are automatically deleted after ${DELETE_DELAY/1000} seconds
-6. Your voice time is automatically tracked!
+6. All voice activity is logged with timestamps!
 
 **🎯 Features:**
-• Dynamic voice channel creation
+• Dynamic voice channel creation with One Piece themed names
 • Auto-synced category permissions
-• Voice time tracking with PostgreSQL
+• Voice time tracking with PostgreSQL database
+• **Real-time voice activity logging with local timestamps**
 • Captain permissions for channel creators
 • Automatic cleanup of empty channels
-• Welcome sounds with The Going Merry theme`);
+• Welcome sounds with The Going Merry theme
+• Detailed voice analytics and statistics
+
+**🔍 Voice Activity Logging:**
+Set \`ENABLE_VOICE_LOGGING=true\` and create a log channel with \`!createvoicelog\` to track all voice events including joins, leaves, moves, and mute/unmute actions with precise timestamps!`);
     }
 });
 
@@ -956,7 +1097,7 @@ async function gracefulShutdown() {
 // Keep the process alive and log status
 setInterval(() => {
     if (DEBUG) {
-        console.log(`🏴‍☠️ Bot Status - Guilds: ${client.guilds.cache.size}, Active Voice Sessions: ${voiceSessions.size}, Audio Connections: ${activeConnections.size}, Uptime: ${Math.floor(process.uptime()/60)}m`);
+        console.log(`🏴‍☠️ Bot Status - Guilds: ${client.guilds.cache.size}, Active Voice Sessions: ${voiceSessions.size}, Audio Connections: ${activeConnections.size}, Voice Logging: ${process.env.ENABLE_VOICE_LOGGING === 'true' ? 'ON' : 'OFF'}, Uptime: ${Math.floor(process.uptime()/60)}m`);
     }
 }, 300000); // Log every 5 minutes in debug mode
 
@@ -966,6 +1107,7 @@ async function startBot() {
     log(`🔑 Discord Token: ${DISCORD_TOKEN ? '✅ Provided' : '❌ MISSING'}`);
     log(`🆔 Client ID: ${CLIENT_ID ? '✅ Provided' : '❌ MISSING'}`);
     log(`🗄️ Database URL: ${process.env.DATABASE_URL ? '✅ Provided' : '❌ MISSING'}`);
+    log(`🔍 Voice Logging: ${process.env.ENABLE_VOICE_LOGGING === 'true' ? '✅ Enabled' : '❌ Disabled'}`);
 
     if (!DISCORD_TOKEN) {
         console.error('❌ DISCORD_TOKEN is required! Please check your .env file.');
