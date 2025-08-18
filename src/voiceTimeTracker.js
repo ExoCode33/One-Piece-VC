@@ -1,4 +1,4 @@
-// src/voiceTimeTracker.js - Enhanced with XP System
+// src/voiceTimeTracker.js - Complete Enhanced with XP System
 const ChannelLogger = require('./channelLogger');
 
 class VoiceTimeTracker {
@@ -125,7 +125,8 @@ class VoiceTimeTracker {
                 { 
                     oldChannelName: oldState.channel.name,
                     xpEarned: sessionData.xpEarned,
-                    xpCapHit: sessionData.xpCapHit
+                    xpCapHit: sessionData.xpCapHit,
+                    capType: sessionData.capType
                 }
             );
         }
