@@ -1,4 +1,4 @@
-// src/channelLogger.js
+// src/channelLogger.js - Enhanced with XP Information
 const { EmbedBuilder } = require('discord.js');
 
 class ChannelLogger {
@@ -89,7 +89,7 @@ class ChannelLogger {
     createLogEmbed(userId, username, channelId, channelName, action, additionalInfo) {
         const embed = new EmbedBuilder()
             .setTimestamp() // This automatically uses Discord's timestamp system
-            .setFooter({ text: 'Voice Activity Logger' }); // Remove timestamp from footer
+            .setFooter({ text: 'Voice Activity Logger with XP Tracking' }); // Remove timestamp from footer
 
         const userMention = `<@${userId}>`;
         const channelMention = channelId ? `<#${channelId}>` : 'Unknown Channel';
@@ -132,6 +132,21 @@ class ChannelLogger {
                     
                     embed.addFields({ name: '⏱️ Session Duration', value: durationText, inline: true });
                 }
+
+                // Add XP information if available
+                if (additionalInfo.xpEarned !== undefined) {
+                    let xpText = `+${additionalInfo.xpEarned} XP`;
+                    
+                    if (additionalInfo.xpCapHit) {
+                        const capEmoji = additionalInfo.capType === 'daily' ? '📅' : 
+                                       additionalInfo.capType === 'weekly' ? '📆' : 
+                                       additionalInfo.capType === 'monthly' ? '🗓️' : '🚫';
+                        xpText += ` ${capEmoji} (${additionalInfo.capType} cap reached)`;
+                        embed.setColor('#FFA500'); // Orange for cap hit
+                    }
+                    
+                    embed.addFields({ name: '⚡ XP Earned', value: xpText, inline: true });
+                }
                 break;
 
             case 'MOVE':
@@ -142,72 +157,3 @@ class ChannelLogger {
                     .addFields(
                         { name: '👤 User', value: `${username}`, inline: true },
                         { name: '🏠 From', value: `${additionalInfo.oldChannelName || 'Unknown'}`, inline: true },
-                        { name: '🏠 To', value: `${channelName || 'Unknown'}`, inline: true },
-                        { name: '🕐 Time', value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: true }
-                    );
-                break;
-
-            default:
-                embed
-                    .setColor('#FFFF00') // Yellow
-                    .setTitle('❓ Voice Activity')
-                    .setDescription(`${userMention} - ${action} in ${channelMention}`)
-                    .addFields(
-                        { name: '👤 User', value: `${username}`, inline: true },
-                        { name: '🏠 Channel', value: `${channelName || 'Unknown'}`, inline: true },
-                        { name: '🔧 Action', value: action, inline: true },
-                        { name: '🕐 Time', value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: true }
-                    );
-        }
-
-        return embed;
-    }
-
-    // Method to create log channel
-    async createLogChannel(guild) {
-        try {
-            // If using channel ID, check if it exists
-            if (this.logChannelId) {
-                const existingChannel = guild.channels.cache.get(this.logChannelId);
-                if (existingChannel) {
-                    return existingChannel;
-                } else {
-                    console.warn(`⚠️ Channel ID ${this.logChannelId} not found, creating new channel with name: ${this.logChannelName}`);
-                }
-            }
-
-            // Check if channel with name already exists
-            const existingChannel = guild.channels.cache.find(channel => 
-                channel.name === this.logChannelName && channel.type === 0
-            );
-
-            if (existingChannel) {
-                console.log(`💡 Found existing channel: ${existingChannel.name} (ID: ${existingChannel.id})`);
-                console.log(`💡 To use this channel, set VOICE_LOG_CHANNEL_ID=${existingChannel.id} in your .env`);
-                return existingChannel;
-            }
-
-            const newChannel = await guild.channels.create({
-                name: this.logChannelName,
-                type: 0, // Text channel
-                topic: 'Automatic voice activity logging - Join/Leave/Move events',
-                permissionOverwrites: [
-                    {
-                        id: guild.id, // @everyone
-                        deny: ['SendMessages'], // Only allow viewing, not sending
-                        allow: ['ViewChannel']
-                    }
-                ]
-            });
-
-            console.log(`✅ Created voice log channel: ${newChannel.name} (ID: ${newChannel.id}) in ${guild.name}`);
-            console.log(`💡 To use this channel permanently, set VOICE_LOG_CHANNEL_ID=${newChannel.id} in your .env`);
-            return newChannel;
-        } catch (error) {
-            console.error('❌ Error creating voice log channel:', error);
-            return null;
-        }
-    }
-}
-
-module.exports = ChannelLogger;
