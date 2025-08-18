@@ -1,4 +1,4 @@
-// src/slashCommands.js - Enhanced with XP Commands
+// src/slashCommands.js - Complete Enhanced with XP Commands
 const { SlashCommandBuilder, REST, Routes } = require('discord.js');
 
 const commands = [
