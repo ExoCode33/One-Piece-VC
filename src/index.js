@@ -35,9 +35,6 @@ const processingUsers = new Set();
 // NEW: Global lock to prevent any channel creation during processing
 let globalChannelCreationLock = false;
 
-// NEW: Global rate limiting for channel creation per guild
-const lastChannelCreation = new Map(); // guildId -> timestamp
-
 async function initializeConnection() {
     // Railway PostgreSQL connection
     if (process.env.DATABASE_URL) {
@@ -523,7 +520,7 @@ client.once('ready', async () => {
     }
 });
 
-// FIXED: Voice state update handler with simplified duplicate prevention
+// FIXED: Voice state update handler - ONLY handles dynamic channel creation, NOT voice logging
 client.on('voiceStateUpdate', async (oldState, newState) => {
     const userId = newState.id;
     const member = newState.member;
@@ -533,120 +530,283 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
     debugLog(`Voice State Update - User: ${member?.displayName || 'Unknown'}`);
     debugLog(`  Old Channel: ${oldState.channel?.name || 'None'} (${oldState.channelId || 'None'})`);
     debugLog(`  New Channel: ${newState.channel?.name || 'None'} (${newState.channelId || 'None'})`);
+    debugLog(`  Currently Processing: ${processingUsers.has(userId) ? 'YES' : 'NO'}`);
     debugLog(`  Global Lock: ${globalChannelCreationLock ? 'LOCKED' : 'UNLOCKED'}`);
 
     try {
-        // ONLY HANDLE: Dynamic Voice Channel Creation (BEFORE voice tracking)
-        if (newState.channelId && newState.channel?.name === CREATE_CHANNEL_NAME && !member.user.bot) {
+        // CRITICAL: Check for channel creation BEFORE voice tracking to prevent race conditions
+        let shouldCreateChannel = false;
+        
+        // ONLY HANDLE: Dynamic Voice Channel Creation
+        if (newState.channelId && newState.channel?.name === CREATE_CHANNEL_NAME) {
             debugLog(`🎯 User joined trigger channel: ${CREATE_CHANNEL_NAME}`);
             
-            // Check global lock first
-            if (globalChannelCreationLock) {
+            // Don't process if user is a bot
+            if (member.user.bot) {
+                debugLog(`🤖 Bot user ${member.displayName} joined trigger channel, ignoring`);
+            } else if (globalChannelCreationLock) {
                 debugLog(`🚫 GLOBAL LOCK ACTIVE - Channel creation blocked for ${member.displayName}`);
+            } else {
+                shouldCreateChannel = true;
+            }
+        }
+
+        // Handle channel creation FIRST before voice tracking
+        if (shouldCreateChannel) {
+            // SET GLOBAL LOCK IMMEDIATELY
+            globalChannelCreationLock = true;
+            debugLog(`🔒 GLOBAL LOCK ENGAGED - Blocking all channel creation`);
+            
+            // AGGRESSIVE duplicate prevention - check if ANY user is being processed for this guild
+            const guildProcessingUsers = Array.from(processingUsers).filter(id => {
+                const guildMember = newState.guild.members.cache.get(id);
+                return guildMember !== undefined;
+            });
+            
+            if (guildProcessingUsers.length > 0) {
+                debugLog(`🚫 Guild ${guildId} already has ${guildProcessingUsers.length} users being processed, BLOCKING new creation for ${member.displayName}`);
+                globalChannelCreationLock = false;
                 return;
             }
-
+            
             // Check if user is already being processed
             if (processingUsers.has(userId)) {
-                debugLog(`🚫 User ${member.displayName} is already being processed, ignoring`);
+                debugLog(`🚫 User ${member.displayName} is ALREADY being processed, ABORTING duplicate creation`);
+                globalChannelCreationLock = false;
                 return;
             }
 
-            // Set global lock immediately
-            globalChannelCreationLock = true;
-            processingUsers.add(userId);
-            debugLog(`🔒 GLOBAL LOCK ENGAGED + User locked for ${member.displayName}`);
+            // Double-check: if user is already in a bot-created channel, don't process
+            const userCurrentChannel = member.voice.channel;
+            if (userCurrentChannel && isBotCreatedChannel(guildId, userCurrentChannel.id)) {
+                debugLog(`🚫 User ${member.displayName} is already in a bot-created channel: ${userCurrentChannel.name}, ignoring trigger`);
+                globalChannelCreationLock = false;
+                return;
+            }
 
-            // Set timeout to release lock in case of errors
+            // Check if there are recent bot-created channels in this guild (within last 5 seconds)
+            const guildBotChannels = botCreatedChannels.get(guildId) || new Set();
+            let hasRecentChannel = false;
+            
+            for (const channelId of guildBotChannels) {
+                const channel = newState.guild.channels.cache.get(channelId);
+                if (channel) {
+                    const channelAge = Date.now() - channel.createdTimestamp;
+                    if (channelAge < 5000) { // Less than 5 seconds old
+                        hasRecentChannel = true;
+                        debugLog(`🚫 Recent bot channel found: ${channel.name} (${channelAge}ms old), blocking duplicate creation`);
+                        break;
+                    }
+                }
+            }
+            
+            if (hasRecentChannel) {
+                debugLog(`🚫 Recent bot-created channel exists, ignoring trigger for ${member.displayName}`);
+                globalChannelCreationLock = false;
+                return;
+            }
+
+            debugLog(`✅ All checks passed - Starting channel creation process for ${member.displayName}`);
+
+            // Add user to processing set IMMEDIATELY
+            processingUsers.add(userId);
+            debugLog(`🔒 LOCKED user ${userId} in processing set (size now: ${processingUsers.size})`);
+            
+            // Set timeout to remove user from processing set in case something goes wrong
             const timeoutId = setTimeout(() => {
                 processingUsers.delete(userId);
                 globalChannelCreationLock = false;
-                debugLog(`⏰ TIMEOUT: Released locks for ${userId}`);
-            }, 10000);
+                debugLog(`⏰ TIMEOUT: Removed ${userId} from processing set and released global lock due to timeout (size now: ${processingUsers.size})`);
+            }, 15000); // 15 second timeout
 
             try {
                 const guild = newState.guild;
                 
-                // Verify user is still in trigger channel
-                if (!member.voice.channelId || member.voice.channel?.name !== CREATE_CHANNEL_NAME) {
-                    debugLog(`❌ User ${member.displayName} no longer in trigger channel, aborting`);
+                // Double-check user is still in voice
+                if (!member.voice.channelId) {
+                    debugLog(`❌ User ${member.displayName} no longer in voice, aborting channel creation`);
+                    return;
+                }
+
+                // Triple-check user is still in the trigger channel
+                if (member.voice.channel?.name !== CREATE_CHANNEL_NAME) {
+                    debugLog(`❌ User ${member.displayName} no longer in trigger channel, aborting channel creation`);
                     return;
                 }
                 
-                // Get or create category
                 let category;
+                
+                // If CATEGORY_ID is provided, use it directly
                 if (CATEGORY_ID) {
                     category = guild.channels.cache.get(CATEGORY_ID);
-                } else {
-                    let savedCategory = await getCategoryForGuild(guildId);
-                    if (savedCategory) {
-                        category = guild.channels.cache.get(savedCategory.categoryId);
+                    if (category) {
+                        debugLog(`✅ Using direct category ID: ${CATEGORY_ID} (${category.name})`);
+                        // Save/update this category in database
+                        await updateCategoryForGuild(guildId, category.id, category.name);
+                    } else {
+                        console.error(`❌ Category with ID ${CATEGORY_ID} not found! Creating fallback category.`);
                     }
+                }
+                
+                // If no direct category ID or category not found, use saved/default logic
+                if (!category) {
+                    // Get saved category or use default
+                    let savedCategory = await getCategoryForGuild(guildId);
+                    
+                    if (savedCategory) {
+                        // Try to find the saved category by ID first
+                        category = guild.channels.cache.get(savedCategory.categoryId);
+                        if (!category) {
+                            // Saved category doesn't exist anymore, find by name
+                            category = guild.channels.cache.find(c => 
+                                c.name === savedCategory.categoryName && c.type === ChannelType.GuildCategory
+                            );
+                            
+                            if (category) {
+                                // Update the database with the new category ID
+                                await updateCategoryForGuild(guildId, category.id, category.name);
+                                log(`🔄 Category ID updated: ${savedCategory.categoryName}`);
+                            }
+                        }
+                    }
+                    
                     if (!category) {
+                        // Create new category with default name
+                        debugLog(`Category not found, creating new one: ${DEFAULT_CATEGORY_NAME}`);
                         category = await guild.channels.create({
                             name: DEFAULT_CATEGORY_NAME,
                             type: ChannelType.GuildCategory,
                         });
+                        
+                        // Save the new category to database
                         await updateCategoryForGuild(guildId, category.id, category.name);
+                        log(`📁 Created and saved new category: ${DEFAULT_CATEGORY_NAME}`);
                     }
                 }
 
                 const crewName = getRandomCrewName();
-                debugLog(`🎲 Creating channel: ${crewName}`);
+                debugLog(`🎲 Selected crew name: ${crewName}`);
                 
-                // Create channel
+                // Final check before channel creation
+                if (!member.voice.channelId || member.voice.channel?.name !== CREATE_CHANNEL_NAME) {
+                    debugLog(`❌ Final check failed - user moved or disconnected, aborting`);
+                    return;
+                }
+
+                // Create the new voice channel with basic setup first
+                debugLog(`🏗️ Creating new voice channel: ${crewName}`);
                 const newChannel = await guild.channels.create({
                     name: crewName,
                     type: ChannelType.GuildVoice,
                     parent: category.id,
                 });
 
-                // Track the channel
+                debugLog(`✅ Channel created successfully: ${newChannel.name} (${newChannel.id})`);
+
+                // Add the newly created channel to bot-created tracking
                 addBotCreatedChannel(guildId, newChannel.id);
 
-                // Set permissions
+                // Sync permissions with category and add creator permissions
                 await syncChannelWithCategory(newChannel, category, member.id);
 
-                log(`🚢 Created new crew: ${crewName} for ${member.displayName}`);
+                // Ensure channel is in the correct category
+                if (newChannel.parentId !== category.id) {
+                    try {
+                        await newChannel.setParent(category.id);
+                        debugLog(`🔧 Manually moved ${crewName} to category ${category.name}`);
+                    } catch (moveError) {
+                        console.error(`❌ Error moving channel to category:`, moveError);
+                    }
+                }
 
-                // Move user
-                if (member.voice.channelId && member.voice.channel?.name === CREATE_CHANNEL_NAME) {
-                    await member.voice.setChannel(newChannel);
-                    debugLog(`✅ Successfully moved ${member.displayName} to ${crewName}`);
-                    
-                    // Play welcome sound after move
-                    setTimeout(() => {
-                        if (newChannel.members.size > 0) {
-                            playWelcomeSound(newChannel);
+                log(`🚢 Created new crew: ${crewName} for ${member.displayName}`);
+                log(`👑 ${member.displayName} is now captain of ${crewName}`);
+
+                try {
+                    // Final check before moving user
+                    if (member.voice.channelId && member.voice.channel?.name === CREATE_CHANNEL_NAME) {
+                        debugLog(`🚀 Moving user ${member.displayName} to ${crewName}`);
+                        await member.voice.setChannel(newChannel);
+                        debugLog(`✅ Successfully moved ${member.displayName} to ${crewName}`);
+                        
+                        // Play welcome sound after a short delay, only if channel has members
+                        setTimeout(() => {
+                            if (newChannel.members.size > 0) {
+                                log(`🎵 Playing welcome sound in ${crewName}...`);
+                                playWelcomeSound(newChannel);
+                            } else {
+                                debugLog(`🚫 Channel ${crewName} is empty, skipping welcome sound`);
+                            }
+                        }, 1500);
+                        
+                    } else {
+                        debugLog(`❌ User ${member.displayName} disconnected or moved before we could move them, cleaning up channel`);
+                        setTimeout(async () => {
+                            try {
+                                if (newChannel.members.size === 0) {
+                                    removeBotCreatedChannel(guildId, newChannel.id);
+                                    await newChannel.delete();
+                                    debugLog(`🗑️ Cleaned up unused crew: ${crewName}`);
+                                }
+                            } catch (cleanupError) {
+                                console.error(`❌ Error cleaning up channel:`, cleanupError);
+                            }
+                        }, 1000);
+                    }
+                } catch (moveError) {
+                    console.error(`❌ Error moving user to new channel:`, moveError);
+                    setTimeout(async () => {
+                        try {
+                            if (newChannel.members.size === 0) {
+                                removeBotCreatedChannel(guildId, newChannel.id);
+                                await newChannel.delete();
+                                debugLog(`🗑️ Cleaned up failed crew: ${crewName}`);
+                            }
+                        } catch (cleanupError) {
+                            console.error(`❌ Error cleaning up channel:`, cleanupError);
                         }
-                    }, 1500);
+                    }, 1000);
                 }
 
             } finally {
-                // Always release locks
+                // Always clear the timeout and remove user from processing set
                 clearTimeout(timeoutId);
                 processingUsers.delete(userId);
                 globalChannelCreationLock = false;
-                debugLog(`🔓 Released all locks for ${member.displayName}`);
+                debugLog(`🔓 UNLOCKED user ${userId} from processing set and released global lock (size now: ${processingUsers.size})`);
+                debugLog(`✅ Finished processing user ${member.displayName}`);
             }
         }
 
-        // Handle voice tracking AFTER channel creation
+        // NOW handle voice tracking AFTER channel creation is complete
         if (voiceTimeTracker) {
             await voiceTimeTracker.handleVoiceStateUpdate(oldState, newState);
         }
 
-        // Handle channel cleanup
+        // ONLY HANDLE: Auto-delete empty dynamic channels (only bot-created ones)
         if (oldState.channelId && !newState.channelId) {
+            // User completely left voice (not just moved between channels)
             const oldChannel = oldState.channel;
             
-            if (oldChannel && 
-                oldChannel.name !== CREATE_CHANNEL_NAME && 
-                !isChannelProtected(oldChannel.id) && 
-                isBotCreatedChannel(guildId, oldChannel.id) && 
-                oldChannel.members.size === 0) {
+            debugLog(`👋 User ${member?.displayName} completely left voice from ${oldChannel?.name}`);
+            
+            // Check if this channel should be deleted
+            const shouldDelete = oldChannel && 
+                oldChannel.name !== CREATE_CHANNEL_NAME && // Not the trigger channel
+                !isChannelProtected(oldChannel.id) && // Not in protected list
+                isBotCreatedChannel(guildId, oldChannel.id) && // Only bot-created channels
+                oldChannel.members.size === 0; // Empty channel
+            
+            if (shouldDelete) {
+                debugLog(`🕐 Scheduling deletion of empty bot-created crew: ${oldChannel.name} in ${DELETE_DELAY}ms`);
                 
-                debugLog(`🕐 Scheduling deletion of empty crew: ${oldChannel.name} in ${DELETE_DELAY}ms`);
+                // Clean up any voice connections for this channel
+                if (activeConnections.has(oldChannel.id)) {
+                    const connection = activeConnections.get(oldChannel.id);
+                    connection.destroy();
+                    activeConnections.delete(oldChannel.id);
+                    debugLog(`🔌 Cleaned up voice connection for ${oldChannel.name}`);
+                }
                 
                 setTimeout(async () => {
                     try {
@@ -655,20 +815,31 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
                             removeBotCreatedChannel(guildId, oldChannel.id);
                             await channelToDelete.delete();
                             log(`🗑️ Deleted empty bot-created crew: ${oldChannel.name}`);
+                        } else {
+                            debugLog(`👥 Crew ${oldChannel.name} no longer empty, keeping it`);
                         }
                     } catch (error) {
-                        console.error(`❌ Error deleting channel:`, error);
+                        console.error(`❌ Error deleting channel ${oldChannel.name}:`, error);
                     }
                 }, DELETE_DELAY);
+            } else if (oldChannel && oldChannel.members.size === 0) {
+                // Log why we didn't delete the channel
+                if (oldChannel.name === CREATE_CHANNEL_NAME) {
+                    debugLog(`🚫 Not deleting trigger channel: ${oldChannel.name}`);
+                } else if (isChannelProtected(oldChannel.id)) {
+                    debugLog(`🛡️ Not deleting protected channel: ${oldChannel.name}`);
+                } else if (!isBotCreatedChannel(guildId, oldChannel.id)) {
+                    debugLog(`🚫 Not deleting non-bot-created channel: ${oldChannel.name}`);
+                }
             }
         }
 
     } catch (error) {
         console.error('❌ Error in voiceStateUpdate:', error);
-        // Emergency cleanup
+        // Make sure to remove user from processing set if an error occurs
         processingUsers.delete(userId);
         globalChannelCreationLock = false;
-        debugLog(`🚨 EMERGENCY CLEANUP: Released all locks due to error`);
+        debugLog(`🔓 ERROR CLEANUP: Removed user ${userId} from processing set and released global lock due to error`);
     }
 });created channel: ${oldChannel.name}`);
                 }
