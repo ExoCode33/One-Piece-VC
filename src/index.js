@@ -32,8 +32,8 @@ let voiceTimeTracker;
 // FIXED: Track users who are currently being processed to prevent duplicate channels
 const processingUsers = new Set();
 
-// NEW: Global rate limiting for channel creation per guild
-const lastChannelCreation = new Map(); // guildId -> timestamp
+// NEW: Global lock to prevent any channel creation during processing
+let globalChannelCreationLock = false;
 
 async function initializeConnection() {
     // Railway PostgreSQL connection
@@ -531,13 +531,12 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
     debugLog(`  Old Channel: ${oldState.channel?.name || 'None'} (${oldState.channelId || 'None'})`);
     debugLog(`  New Channel: ${newState.channel?.name || 'None'} (${newState.channelId || 'None'})`);
     debugLog(`  Currently Processing: ${processingUsers.has(userId) ? 'YES' : 'NO'}`);
+    debugLog(`  Global Lock: ${globalChannelCreationLock ? 'LOCKED' : 'UNLOCKED'}`);
 
     try {
-        // Let VoiceTimeTracker handle all voice logging FIRST
-        if (voiceTimeTracker) {
-            await voiceTimeTracker.handleVoiceStateUpdate(oldState, newState);
-        }
-
+        // CRITICAL: Check for channel creation BEFORE voice tracking to prevent race conditions
+        let shouldCreateChannel = false;
+        
         // ONLY HANDLE: Dynamic Voice Channel Creation
         if (newState.channelId && newState.channel?.name === CREATE_CHANNEL_NAME) {
             debugLog(`🎯 User joined trigger channel: ${CREATE_CHANNEL_NAME}`);
@@ -545,8 +544,18 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
             // Don't process if user is a bot
             if (member.user.bot) {
                 debugLog(`🤖 Bot user ${member.displayName} joined trigger channel, ignoring`);
-                return;
+            } else if (globalChannelCreationLock) {
+                debugLog(`🚫 GLOBAL LOCK ACTIVE - Channel creation blocked for ${member.displayName}`);
+            } else {
+                shouldCreateChannel = true;
             }
+        }
+
+        // Handle channel creation FIRST before voice tracking
+        if (shouldCreateChannel) {
+            // SET GLOBAL LOCK IMMEDIATELY
+            globalChannelCreationLock = true;
+            debugLog(`🔒 GLOBAL LOCK ENGAGED - Blocking all channel creation`);
             
             // AGGRESSIVE duplicate prevention - check if ANY user is being processed for this guild
             const guildProcessingUsers = Array.from(processingUsers).filter(id => {
@@ -556,13 +565,14 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
             
             if (guildProcessingUsers.length > 0) {
                 debugLog(`🚫 Guild ${guildId} already has ${guildProcessingUsers.length} users being processed, BLOCKING new creation for ${member.displayName}`);
-                debugLog(`🚫 Users being processed: ${guildProcessingUsers.join(', ')}`);
+                globalChannelCreationLock = false;
                 return;
             }
             
             // Check if user is already being processed
             if (processingUsers.has(userId)) {
                 debugLog(`🚫 User ${member.displayName} is ALREADY being processed, ABORTING duplicate creation`);
+                globalChannelCreationLock = false;
                 return;
             }
 
@@ -570,6 +580,7 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
             const userCurrentChannel = member.voice.channel;
             if (userCurrentChannel && isBotCreatedChannel(guildId, userCurrentChannel.id)) {
                 debugLog(`🚫 User ${member.displayName} is already in a bot-created channel: ${userCurrentChannel.name}, ignoring trigger`);
+                globalChannelCreationLock = false;
                 return;
             }
 
@@ -591,22 +602,11 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
             
             if (hasRecentChannel) {
                 debugLog(`🚫 Recent bot-created channel exists, ignoring trigger for ${member.displayName}`);
-                return;
-            }
-
-            // Guild-wide rate limiting (no more than 1 channel creation per 3 seconds per guild)
-            const lastCreation = lastChannelCreation.get(guildId) || 0;
-            const timeSinceLastCreation = Date.now() - lastCreation;
-            
-            if (timeSinceLastCreation < 3000) { // 3 seconds
-                debugLog(`🚫 Guild rate limit: Only ${timeSinceLastCreation}ms since last creation, need 3000ms. Blocking ${member.displayName}`);
+                globalChannelCreationLock = false;
                 return;
             }
 
             debugLog(`✅ All checks passed - Starting channel creation process for ${member.displayName}`);
-
-            // Update rate limiting timestamp
-            lastChannelCreation.set(guildId, Date.now());
 
             // Add user to processing set IMMEDIATELY
             processingUsers.add(userId);
@@ -615,7 +615,8 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
             // Set timeout to remove user from processing set in case something goes wrong
             const timeoutId = setTimeout(() => {
                 processingUsers.delete(userId);
-                debugLog(`⏰ TIMEOUT: Removed ${userId} from processing set due to timeout (size now: ${processingUsers.size})`);
+                globalChannelCreationLock = false;
+                debugLog(`⏰ TIMEOUT: Removed ${userId} from processing set and released global lock due to timeout (size now: ${processingUsers.size})`);
             }, 15000); // 15 second timeout
 
             try {
@@ -771,9 +772,15 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
                 // Always clear the timeout and remove user from processing set
                 clearTimeout(timeoutId);
                 processingUsers.delete(userId);
-                debugLog(`🔓 UNLOCKED user ${userId} from processing set (size now: ${processingUsers.size})`);
+                globalChannelCreationLock = false;
+                debugLog(`🔓 UNLOCKED user ${userId} from processing set and released global lock (size now: ${processingUsers.size})`);
                 debugLog(`✅ Finished processing user ${member.displayName}`);
             }
+        }
+
+        // NOW handle voice tracking AFTER channel creation is complete
+        if (voiceTimeTracker) {
+            await voiceTimeTracker.handleVoiceStateUpdate(oldState, newState);
         }
 
         // ONLY HANDLE: Auto-delete empty dynamic channels (only bot-created ones)
@@ -823,6 +830,30 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
                     debugLog(`🛡️ Not deleting protected channel: ${oldChannel.name}`);
                 } else if (!isBotCreatedChannel(guildId, oldChannel.id)) {
                     debugLog(`🚫 Not deleting non-bot-created channel: ${oldChannel.name}`);
+                }
+            }
+        }
+
+    } catch (error) {
+        console.error('❌ Error in voiceStateUpdate:', error);
+        // Make sure to remove user from processing set if an error occurs
+        processingUsers.delete(userId);
+        globalChannelCreationLock = false;
+        debugLog(`🔓 ERROR CLEANUP: Removed user ${userId} from processing set and released global lock due to error`);
+    }
+});created channel: ${oldChannel.name}`);
+                }
+            }
+        }
+
+    } catch (error) {
+        console.error('❌ Error in voiceStateUpdate:', error);
+        // Make sure to remove user from processing set if an error occurs
+        processingUsers.delete(userId);
+        globalChannelCreationLock = false;
+        debugLog(`🔓 ERROR CLEANUP: Removed user ${userId} from processing set and released global lock due to error`);
+    }
+});created channel: ${oldChannel.name}`);
                 }
             }
         }
