@@ -115,7 +115,6 @@ const client = new Client({
 const activeConnections = new Map(); // channelId -> voice connection
 const recentCreations = new Set(); // userId -> prevent rapid channel creation
 const userOwnedChannels = new Map(); // userId -> channelId (track who owns which channel)
-const processingUsers = new Set(); // ATOMIC: users currently being processed
 
 // Audio file paths
 const SOUNDS_DIR = path.join(__dirname, '..', 'sounds');
@@ -482,18 +481,7 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
         if (!oldState.channelId && newState.channelId && newState.channel?.name === CREATE_CHANNEL_NAME) {
             console.log(`🎯 USER JOINED CREATE CHANNEL: ${member.displayName} joined ${CREATE_CHANNEL_NAME}`);
             
-            // ATOMIC LOCK: Prevent parallel processing of same user
-            if (processingUsers.has(userId)) {
-                console.log(`🔒 ATOMIC BLOCK: ${member.displayName} is already being processed, ignoring`);
-                return;
-            }
-            
-            // Lock this user immediately
-            processingUsers.add(userId);
-            console.log(`🔒 ATOMIC LOCK: ${member.displayName} locked for processing`);
-            
-            try {
-                const guild = newState.guild;
+            const guild = newState.guild;
             
             if (!member.voice.channelId) {
                 debugLog(`User ${member.displayName} no longer in voice, skipping channel creation`);
@@ -615,7 +603,7 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
             }
         }
 
-        // Auto-delete empty dynamic channels with safe deletion
+        // Auto-delete empty dynamic channels
         if (oldState.channelId && !newState.channelId) {
             const oldChannel = oldState.channel;
             const savedCategory = await getCategoryForGuild(guildId);
@@ -626,42 +614,35 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
                 oldChannel.parent?.name === categoryName &&
                 oldChannel.members.size === 0) {
                 
-                console.log(`🕐 SCHEDULING DELETION: ${oldChannel.name} in ${DELETE_DELAY}ms`);
+                debugLog(`🕐 Scheduling deletion of empty crew: ${oldChannel.name} in ${DELETE_DELAY}ms`);
                 
                 // Clean up any voice connections for this channel
                 if (activeConnections.has(oldChannel.id)) {
                     const connection = activeConnections.get(oldChannel.id);
                     connection.destroy();
                     activeConnections.delete(oldChannel.id);
-                    console.log(`🔌 CLEANED CONNECTION: for ${oldChannel.name}`);
+                    debugLog(`🔌 Cleaned up voice connection for ${oldChannel.name}`);
                 }
                 
                 setTimeout(async () => {
                     try {
-                        // SAFE DELETION: Check if channel still exists
-                        const channelToDelete = await oldChannel.guild.channels.fetch(oldChannel.id).catch(() => null);
+                        const channelToDelete = oldChannel.guild.channels.cache.get(oldChannel.id);
                         if (channelToDelete && channelToDelete.members.size === 0) {
                             await channelToDelete.delete();
-                            console.log(`🗑️ SAFELY DELETED: ${oldChannel.name}`);
+                            log(`🗑️ Deleted empty crew: ${oldChannel.name}`);
                             
                             // Clean up ownership tracking
                             for (const [userId, channelId] of userOwnedChannels.entries()) {
                                 if (channelId === oldChannel.id) {
                                     userOwnedChannels.delete(userId);
-                                    console.log(`🧹 CLEANED OWNERSHIP: for ${oldChannel.name}`);
+                                    debugLog(`🧹 Removed ownership record for deleted channel ${oldChannel.name}`);
                                 }
                             }
-                        } else if (!channelToDelete) {
-                            console.log(`⚠️ ALREADY DELETED: ${oldChannel.name} was already deleted`);
                         } else {
-                            console.log(`👥 NOT EMPTY: ${oldChannel.name} has ${channelToDelete.members.size} members, keeping it`);
+                            debugLog(`👥 Crew ${oldChannel.name} no longer empty, keeping it`);
                         }
                     } catch (error) {
-                        if (error.code === 10003) {
-                            console.log(`⚠️ ALREADY DELETED: ${oldChannel.name} (Unknown Channel)`);
-                        } else {
-                            console.error(`❌ Error deleting channel ${oldChannel.name}:`, error.message);
-                        }
+                        console.error(`❌ Error deleting channel ${oldChannel.name}:`, error);
                     }
                 }, DELETE_DELAY);
             }
