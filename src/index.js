@@ -18,10 +18,6 @@ const CATEGORY_ID = process.env.CATEGORY_ID; // Direct category ID override
 const DELETE_DELAY = parseInt(process.env.DELETE_DELAY) || 1000;
 const DEBUG = process.env.DEBUG === 'true';
 
-// NEW: Admin and Protection Configuration
-const ADMIN_ROLE_ID = process.env.ADMIN_ROLE_ID; // Role ID for admin permissions
-const PROTECTED_CHANNEL_IDS = process.env.PROTECTED_CHANNEL_IDS ? process.env.PROTECTED_CHANNEL_IDS.split(',').map(id => id.trim()) : [];
-
 // Audio Configuration
 const AUDIO_VOLUME = parseFloat(process.env.AUDIO_VOLUME) || 0.4;
 
@@ -118,9 +114,6 @@ const client = new Client({
 // Track audio connections
 const activeConnections = new Map(); // channelId -> voice connection
 
-// NEW: Track bot-created channels per guild
-const botCreatedChannels = new Map(); // guildId -> Set of channel IDs
-
 // Audio file paths
 const SOUNDS_DIR = path.join(__dirname, '..', 'sounds');
 const WELCOME_SOUND = path.join(SOUNDS_DIR, 'The Going Merry One Piece.ogg');
@@ -138,50 +131,6 @@ function debugLog(message) {
 
 function getRandomCrewName() {
     return CREW_NAMES[Math.floor(Math.random() * CREW_NAMES.length)];
-}
-
-// NEW: Helper function to check if user has admin permissions
-function hasAdminPermissions(member) {
-    // Check if user has administrator permissions
-    if (member.permissions.has(PermissionFlagsBits.Administrator)) {
-        return true;
-    }
-    
-    // Check if user has the specific admin role (if configured)
-    if (ADMIN_ROLE_ID && member.roles.cache.has(ADMIN_ROLE_ID)) {
-        return true;
-    }
-    
-    return false;
-}
-
-// NEW: Helper function to check if channel is protected
-function isChannelProtected(channelId) {
-    return PROTECTED_CHANNEL_IDS.includes(channelId);
-}
-
-// NEW: Helper function to check if channel was created by bot
-function isBotCreatedChannel(guildId, channelId) {
-    const guildChannels = botCreatedChannels.get(guildId);
-    return guildChannels && guildChannels.has(channelId);
-}
-
-// NEW: Helper function to add bot-created channel to tracking
-function addBotCreatedChannel(guildId, channelId) {
-    if (!botCreatedChannels.has(guildId)) {
-        botCreatedChannels.set(guildId, new Set());
-    }
-    botCreatedChannels.get(guildId).add(channelId);
-    debugLog(`📝 Added bot-created channel ${channelId} to tracking for guild ${guildId}`);
-}
-
-// NEW: Helper function to remove bot-created channel from tracking
-function removeBotCreatedChannel(guildId, channelId) {
-    const guildChannels = botCreatedChannels.get(guildId);
-    if (guildChannels) {
-        guildChannels.delete(channelId);
-        debugLog(`🗑️ Removed bot-created channel ${channelId} from tracking for guild ${guildId}`);
-    }
 }
 
 // Database functions for guild settings
@@ -418,20 +367,6 @@ client.once('ready', async () => {
     log(`🏴‍☠️ Serving ${client.guilds.cache.size} server(s)`);
     log(`🔊 Audio Volume: ${Math.round(AUDIO_VOLUME * 100)}%`);
     
-    // Log admin configuration
-    if (ADMIN_ROLE_ID) {
-        log(`👑 Admin Role ID configured: ${ADMIN_ROLE_ID}`);
-    } else {
-        log(`⚠️ No Admin Role ID configured - only server administrators can use admin commands`);
-    }
-    
-    // Log protected channels
-    if (PROTECTED_CHANNEL_IDS.length > 0) {
-        log(`🛡️ Protected channels: ${PROTECTED_CHANNEL_IDS.join(', ')}`);
-    } else {
-        log(`⚠️ No protected channels configured`);
-    }
-    
     // Check if welcome sound exists
     if (fs.existsSync(WELCOME_SOUND)) {
         const stats = fs.statSync(WELCOME_SOUND);
@@ -594,9 +529,6 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
                 parent: category.id,
             });
 
-            // NEW: Add the newly created channel to bot-created tracking
-            addBotCreatedChannel(guildId, newChannel.id);
-
             // Sync permissions with category and add creator permissions
             await syncChannelWithCategory(newChannel, category, member.id);
 
@@ -629,7 +561,6 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
                     setTimeout(async () => {
                         try {
                             if (newChannel.members.size === 0) {
-                                removeBotCreatedChannel(guildId, newChannel.id);
                                 await newChannel.delete();
                                 debugLog(`🗑️ Cleaned up unused crew: ${crewName}`);
                             }
@@ -643,7 +574,6 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
                 setTimeout(async () => {
                     try {
                         if (newChannel.members.size === 0) {
-                            removeBotCreatedChannel(guildId, newChannel.id);
                             await newChannel.delete();
                             debugLog(`🗑️ Cleaned up failed crew: ${crewName}`);
                         }
@@ -654,19 +584,18 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
             }
         }
 
-        // UPDATED: Auto-delete empty dynamic channels (only bot-created ones)
+        // Auto-delete empty dynamic channels
         if (oldState.channelId) {
             const oldChannel = oldState.channel;
+            const savedCategory = await getCategoryForGuild(guildId);
+            const categoryName = savedCategory ? savedCategory.categoryName : DEFAULT_CATEGORY_NAME;
             
-            // Check if this channel should be deleted
-            const shouldDelete = oldChannel && 
-                oldChannel.name !== CREATE_CHANNEL_NAME && // Not the trigger channel
-                !isChannelProtected(oldChannel.id) && // Not in protected list
-                isBotCreatedChannel(guildId, oldChannel.id) && // Only bot-created channels
-                oldChannel.members.size === 0; // Empty channel
-            
-            if (shouldDelete) {
-                debugLog(`🕐 Scheduling deletion of empty bot-created crew: ${oldChannel.name} in ${DELETE_DELAY}ms`);
+            if (oldChannel && 
+                oldChannel.name !== CREATE_CHANNEL_NAME && 
+                oldChannel.parent?.name === categoryName &&
+                oldChannel.members.size === 0) {
+                
+                debugLog(`🕐 Scheduling deletion of empty crew: ${oldChannel.name} in ${DELETE_DELAY}ms`);
                 
                 // Clean up any voice connections for this channel
                 if (activeConnections.has(oldChannel.id)) {
@@ -680,9 +609,8 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
                     try {
                         const channelToDelete = oldChannel.guild.channels.cache.get(oldChannel.id);
                         if (channelToDelete && channelToDelete.members.size === 0) {
-                            removeBotCreatedChannel(guildId, oldChannel.id);
                             await channelToDelete.delete();
-                            log(`🗑️ Deleted empty bot-created crew: ${oldChannel.name}`);
+                            log(`🗑️ Deleted empty crew: ${oldChannel.name}`);
                         } else {
                             debugLog(`👥 Crew ${oldChannel.name} no longer empty, keeping it`);
                         }
@@ -690,15 +618,6 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
                         console.error(`❌ Error deleting channel ${oldChannel.name}:`, error);
                     }
                 }, DELETE_DELAY);
-            } else if (oldChannel && oldChannel.members.size === 0) {
-                // Log why we didn't delete the channel
-                if (oldChannel.name === CREATE_CHANNEL_NAME) {
-                    debugLog(`🚫 Not deleting trigger channel: ${oldChannel.name}`);
-                } else if (isChannelProtected(oldChannel.id)) {
-                    debugLog(`🛡️ Not deleting protected channel: ${oldChannel.name}`);
-                } else if (!isBotCreatedChannel(guildId, oldChannel.id)) {
-                    debugLog(`🚫 Not deleting non-bot-created channel: ${oldChannel.name}`);
-                }
             }
         }
 
@@ -725,32 +644,6 @@ client.on('channelUpdate', async (oldChannel, newChannel) => {
         }
     } catch (error) {
         console.error('❌ Error handling category update:', error);
-    }
-});
-
-// Handle channel deletion - clean up tracking
-client.on('channelDelete', async (channel) => {
-    try {
-        if (channel.type === ChannelType.GuildVoice) {
-            const guildId = channel.guild.id;
-            const channelId = channel.id;
-            
-            // Remove from bot-created tracking if it exists
-            if (isBotCreatedChannel(guildId, channelId)) {
-                removeBotCreatedChannel(guildId, channelId);
-                log(`🗑️ Removed deleted bot-created channel from tracking: ${channel.name}`);
-            }
-            
-            // Clean up any active connections
-            if (activeConnections.has(channelId)) {
-                const connection = activeConnections.get(channelId);
-                connection.destroy();
-                activeConnections.delete(channelId);
-                debugLog(`🔌 Cleaned up connection for deleted channel: ${channel.name}`);
-            }
-        }
-    } catch (error) {
-        console.error('❌ Error handling channel deletion:', error);
     }
 });
 
@@ -792,18 +685,7 @@ client.on('interactionCreate', async (interaction) => {
         }
 
         else if (commandName === 'voice-leaderboard') {
-            // NEW: Check admin permissions for leaderboard
-            if (!hasAdminPermissions(interaction.member)) {
-                await interaction.reply({
-                    content: '❌ You need administrator permissions or the admin role to use this command!',
-                    ephemeral: true
-                });
-                return;
-            }
-
             const limit = interaction.options.getInteger('limit') || 10;
-            
-            // FIXED: Get fresh data from database each time
             const topUsers = await voiceTimeTracker.getTopVoiceUsers(interaction.guild.id, limit);
 
             if (topUsers.length === 0) {
@@ -822,29 +704,11 @@ client.on('interactionCreate', async (interaction) => {
                 .setFooter({ text: 'One Piece Voice Bot' });
 
             let description = '';
-            for (let i = 0; i < topUsers.length; i++) {
-                const user = topUsers[i];
-                const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `${i + 1}.`;
+            topUsers.forEach((user, index) => {
+                const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : `${index + 1}.`;
                 const formattedTime = voiceTimeTracker.formatTime(user.total_seconds);
-                
-                // Try to get the actual Discord user to get updated display name
-                let displayName = user.username;
-                try {
-                    const discordUser = await interaction.guild.members.fetch(user.user_id);
-                    if (discordUser) {
-                        displayName = discordUser.displayName;
-                        // Update username in database if it changed
-                        if (displayName !== user.username) {
-                            await voiceTimeTracker.updateUsername(user.user_id, interaction.guild.id, displayName);
-                        }
-                    }
-                } catch (fetchError) {
-                    // User might have left the server, keep stored username
-                    debugLog(`Could not fetch user ${user.user_id}: ${fetchError.message}`);
-                }
-                
-                description += `${medal} **${displayName}** - ${formattedTime}\n`;
-            }
+                description += `${medal} **${user.username}** - ${formattedTime}\n`;
+            });
 
             embed.addFields({ name: '🎤 Rankings', value: description });
 
@@ -1038,55 +902,14 @@ client.on('messageCreate', async (message) => {
 💡 **Solution:** Create a 'sounds' folder and add 'The Going Merry One Piece.ogg'`);
         }
     }
-
-    // NEW: Debug bot-created channels command
-    if (message.content === '!debugchannels') {
-        if (!hasAdminPermissions(message.member)) {
-            return message.reply('❌ You need administrator permissions to use this command!');
-        }
-
-        const guildId = message.guild.id;
-        const botChannels = botCreatedChannels.get(guildId);
-        
-        let response = `🔍 **Bot-Created Channels Debug:**\n`;
-        response += `**Guild ID:** ${guildId}\n`;
-        response += `**Tracked Channels:** ${botChannels ? botChannels.size : 0}\n`;
-        response += `**Protected Channels:** ${PROTECTED_CHANNEL_IDS.length}\n\n`;
-        
-        if (botChannels && botChannels.size > 0) {
-            response += `**Bot-Created Channels:**\n`;
-            botChannels.forEach(channelId => {
-                const channel = message.guild.channels.cache.get(channelId);
-                if (channel) {
-                    response += `- ${channel.name} (${channelId})\n`;
-                } else {
-                    response += `- [Deleted Channel] (${channelId})\n`;
-                }
-            });
-        }
-        
-        if (PROTECTED_CHANNEL_IDS.length > 0) {
-            response += `\n**Protected Channels:**\n`;
-            PROTECTED_CHANNEL_IDS.forEach(channelId => {
-                const channel = message.guild.channels.cache.get(channelId);
-                if (channel) {
-                    response += `- ${channel.name} (${channelId})\n`;
-                } else {
-                    response += `- [Unknown Channel] (${channelId})\n`;
-                }
-            });
-        }
-        
-        message.reply(response);
-    }
     
-    // Help command (updated)
+    // Help command
     if (message.content === '!help') {
         message.reply(`🏴‍☠️ **One Piece Voice Bot Commands**
 
 **📊 Voice Tracking:**
 \`/check-voice-time [@user]\` - Check voice time for a user (NEW!)
-\`/voice-leaderboard [limit]\` - Show top voice users (**Admin Only!**)
+\`/voice-leaderboard [limit]\` - Show top voice users (NEW!)
 \`/bot-info\` - Show bot information (NEW!)
 \`!voicestats\` - Legacy voice stats command
 \`!ping\` - Check bot latency
@@ -1100,7 +923,6 @@ client.on('messageCreate', async (message) => {
 \`!debuglog\` - Show voice logging debug info (Manage Channels required)
 \`!forcelog\` - Force send a test voice event (Manage Channels required)
 \`!createvoicelog\` - Create voice log channel (Manage Channels required)
-\`!debugchannels\` - Show bot-created channels debug info (**Admin Only!**)
 
 **🚢 How to Use:**
 1. Join "${CREATE_CHANNEL_NAME}" voice channel
@@ -1110,16 +932,14 @@ client.on('messageCreate', async (message) => {
 5. Empty crews are automatically deleted after ${DELETE_DELAY/1000} seconds
 6. Voice time is automatically tracked!
 
-**🎯 New Features:**
-• **Smart Channel Deletion**: Only deletes bot-created channels
-• **Protected Channels**: Configured channels will never be deleted
-• **Admin-Only Leaderboard**: Leaderboard command requires admin permissions
-• **Fresh Data**: Leaderboard always shows current data from database
-• **Improved Tracking**: Better channel creation and deletion tracking
-
-**💡 Configuration:**
-• Admin Role ID: ${ADMIN_ROLE_ID || 'Not set (Server admins only)'}
-• Protected Channels: ${PROTECTED_CHANNEL_IDS.length} configured
+**🎯 Features:**
+• Dynamic voice channel creation with One Piece themed names
+• **Simplified voice time tracking (total time only)**
+• **Real-time Discord channel logging of voice events**
+• Captain permissions for channel creators
+• Automatic cleanup of empty channels
+• Welcome sounds with The Going Merry theme
+• **Slash commands for better user experience**
 
 **💡 Use slash commands (/) for the best experience!**
 **🔍 Voice events are logged to your designated channel with rich embeds!**`);
@@ -1168,9 +988,6 @@ async function gracefulShutdown() {
         });
         activeConnections.clear();
         
-        // Clear bot-created channels tracking
-        botCreatedChannels.clear();
-        
         // Close database connection
         log('🗄️ Closing database connection...');
         if (pool) {
@@ -1192,8 +1009,7 @@ async function gracefulShutdown() {
 setInterval(() => {
     if (DEBUG) {
         const activeSessions = voiceTimeTracker ? voiceTimeTracker.getActiveSessionsCount() : 0;
-        const totalBotChannels = Array.from(botCreatedChannels.values()).reduce((sum, set) => sum + set.size, 0);
-        console.log(`🏴‍☠️ Bot Status - Guilds: ${client.guilds.cache.size}, Active Voice Sessions: ${activeSessions}, Audio Connections: ${activeConnections.size}, Bot Channels: ${totalBotChannels}, Uptime: ${Math.floor(process.uptime()/60)}m`);
+        console.log(`🏴‍☠️ Bot Status - Guilds: ${client.guilds.cache.size}, Active Voice Sessions: ${activeSessions}, Audio Connections: ${activeConnections.size}, Uptime: ${Math.floor(process.uptime()/60)}m`);
     }
 }, 300000); // Log every 5 minutes in debug mode
 
