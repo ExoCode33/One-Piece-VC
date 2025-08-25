@@ -422,3 +422,747 @@ client.once('ready', async () => {
         console.warn(`⚠️ Welcome sound not found at: ${WELCOME_SOUND}`);
         console.warn(`📁 Make sure the file exists in the sounds folder`);
     }
+    
+    if (CATEGORY_ID) {
+        log(`🎯 Using direct category ID: ${CATEGORY_ID}`);
+    } else {
+        log(`📁 Using dynamic category management`);
+    }
+    
+    try {
+        // Initialize database connection and create database if needed
+        await initializeConnection();
+        
+        // Initialize database tables
+        await initializeDatabase();
+        
+        // Initialize voice time tracker (this will wipe old tables)
+        voiceTimeTracker = new VoiceTimeTracker(client, pool);
+        log(`⏱️ Voice Time Tracker initialized (database wiped and recreated)`);
+        
+        // Register slash commands
+        if (CLIENT_ID) {
+            await registerSlashCommands(CLIENT_ID, DISCORD_TOKEN);
+        }
+        
+        // Test database connection
+        const result = await pool.query('SELECT NOW()');
+        log(`⏰ Database time: ${result.rows[0].now}`);
+        log('🗄️ Database connection test successful!');
+        
+        // Set up voice tracking for existing voice channel users
+        log('🔍 Checking for existing voice channel users...');
+        client.guilds.cache.forEach(guild => {
+            guild.channels.cache
+                .filter(channel => 
+                    channel.type === ChannelType.GuildVoice && 
+                    channel.members.size > 0 &&
+                    channel.name !== CREATE_CHANNEL_NAME // Skip trigger channel
+                )
+                .forEach(channel => {
+                    channel.members.forEach(member => {
+                        if (!member.user.bot) {
+                            const userId = member.id;
+                            const username = member.displayName;
+                            const guildId = guild.id;
+                            const channelId = channel.id;
+                            const channelName = channel.name;
+                            
+                            // Start tracking existing users
+                            voiceTimeTracker.startSession(userId, username, guildId, channelId, channelName);
+                            
+                            log(`🔄 Now tracking existing user: ${username} in ${channelName}`);
+                        }
+                    });
+                });
+        });
+
+        // Add debug logging for voice logging status
+        if (process.env.ENABLE_VOICE_LOGGING === 'true') {
+            log(`🔍 Voice channel logging is ENABLED`);
+            if (process.env.VOICE_LOG_CHANNEL_ID) {
+                log(`📝 Target log channel ID: ${process.env.VOICE_LOG_CHANNEL_ID}`);
+            } else {
+                log(`📝 Target log channel name: ${process.env.VOICE_LOG_CHANNEL || 'voice-activity-log'}`);
+            }
+        } else {
+            log(`⚠️ Voice channel logging is DISABLED`);
+        }
+        
+    } catch (error) {
+        console.error('❌ Database initialization failed:', error);
+        console.error('❌ Bot will shut down due to database error');
+        process.exit(1);
+    }
+});
+
+// Voice state update handler
+client.on('voiceStateUpdate', async (oldState, newState) => {
+    // Skip all bot voice state changes (including our own bot)
+    if (newState.member?.user.bot || oldState.member?.user.bot) {
+        debugLog(`🤖 Ignoring bot voice state change: ${newState.member?.user.username || oldState.member?.user.username}`);
+        return;
+    }
+
+    const userId = newState.id;
+    const member = newState.member;
+    const guildId = newState.guild.id;
+    const userKey = `${guildId}-${userId}`;
+
+    try {
+        // Handle voice time tracking (now guaranteed to be human users only)
+        if (voiceTimeTracker) {
+            await voiceTimeTracker.handleVoiceStateUpdate(oldState, newState);
+        }
+
+        // Dynamic Voice Channel Creation
+        if (newState.channelId && newState.channel?.name === CREATE_CHANNEL_NAME)
+                
+                // Double-check user is still in voice
+                if (!member.voice.channelId) {
+                    debugLog(`User ${member.displayName} no longer in voice, skipping channel creation`);
+                    return;
+                }
+                
+                // Additional check: make sure they're still in the create channel
+                if (member.voice.channelId !== newState.channelId) {
+                    debugLog(`User ${member.displayName} moved before channel creation, skipping`);
+                    return;
+                }
+                
+                let category;
+                
+                // If CATEGORY_ID is provided, use it directly
+                if (CATEGORY_ID) {
+                    category = guild.channels.cache.get(CATEGORY_ID);
+                    if (category) {
+                        debugLog(`✅ Using direct category ID: ${CATEGORY_ID} (${category.name})`);
+                        // Save/update this category in database
+                        await updateCategoryForGuild(guildId, category.id, category.name);
+                    } else {
+                        console.error(`❌ Category with ID ${CATEGORY_ID} not found! Creating fallback category.`);
+                    }
+                }
+                
+                // If no direct category ID or category not found, use saved/default logic
+                if (!category) {
+                    // Get saved category or use default
+                    let savedCategory = await getCategoryForGuild(guildId);
+                    
+                    if (savedCategory) {
+                        // Try to find the saved category by ID first
+                        category = guild.channels.cache.get(savedCategory.categoryId);
+                        if (!category) {
+                            // Saved category doesn't exist anymore, find by name
+                            category = guild.channels.cache.find(c => 
+                                c.name === savedCategory.categoryName && c.type === ChannelType.GuildCategory
+                            );
+                            
+                            if (category) {
+                                // Update the database with the new category ID
+                                await updateCategoryForGuild(guildId, category.id, category.name);
+                                log(`🔄 Category ID updated: ${savedCategory.categoryName}`);
+                            }
+                        }
+                    }
+                    
+                    if (!category) {
+                        // Create new category with default name
+                        debugLog(`Category not found, creating new one: ${DEFAULT_CATEGORY_NAME}`);
+                        category = await guild.channels.create({
+                            name: DEFAULT_CATEGORY_NAME,
+                            type: ChannelType.GuildCategory,
+                        });
+                        
+                        // Save the new category to database
+                        await updateCategoryForGuild(guildId, category.id, category.name);
+                        log(`📁 Created and saved new category: ${DEFAULT_CATEGORY_NAME}`);
+                    }
+                }
+
+                const crewName = getRandomCrewName();
+                
+                // Create the new voice channel with basic setup first
+                const newChannel = await guild.channels.create({
+                    name: crewName,
+                    type: ChannelType.GuildVoice,
+                    parent: category.id,
+                });
+
+                // Sync permissions with category and add creator permissions
+                await syncChannelWithCategory(newChannel, category, member.id);
+
+                // Ensure channel is in the correct category
+                if (newChannel.parentId !== category.id) {
+                    try {
+                        await newChannel.setParent(category.id);
+                        debugLog(`🔧 Manually moved ${crewName} to category ${category.name}`);
+                    } catch (moveError) {
+                        console.error(`❌ Error moving channel to category:`, moveError);
+                    }
+                }
+
+                log(`🚢 Created new crew: ${crewName} for ${member.displayName}`);
+                log(`👑 ${member.displayName} is now captain of ${crewName}`);
+
+                // Triple-check user is still in voice before moving
+                const currentMember = await guild.members.fetch(member.id);
+                if (currentMember.voice.channelId) {
+                    try {
+                        log(`🔄 Moving ${member.displayName} from ${currentMember.voice.channel.name} to ${crewName}`);
+                        await currentMember.voice.setChannel(newChannel);
+                        log(`✅ Successfully moved ${member.displayName} to ${crewName}`);
+                        
+                        // Play welcome sound immediately after moving user
+                        log(`🎵 Scheduling welcome sound for ${crewName} in 1.5 seconds...`);
+                        setTimeout(() => {
+                            log(`🎵 Now playing welcome sound in ${crewName}`);
+                            playWelcomeSound(newChannel);
+                        }, 1500);
+                        
+                    } catch (moveError) {
+                        console.error(`❌ Error moving user to new channel:`, moveError);
+                        // Clean up the unused channel
+                        setTimeout(() => safeDeleteChannel(newChannel, 'failed user move'), 1000);
+                    }
+                } else {
+                    debugLog(`User ${member.displayName} disconnected before move, cleaning up channel`);
+                    setTimeout(() => safeDeleteChannel(newChannel, 'user disconnected'), 1000);
+                }
+                
+            } finally {
+                // Always remove the creation lock
+                setTimeout(() => {
+                    creationLocks.delete(userKey);
+                    log(`🔓 Removed creation lock for ${member.displayName}`);
+                }, 2000); // Keep lock for 2 seconds to prevent rapid recreations
+            }
+        }
+
+        // Auto-delete empty dynamic channels
+        if (oldState.channelId) {
+            const oldChannel = oldState.channel;
+            const savedCategory = await getCategoryForGuild(guildId);
+            const categoryName = savedCategory ? savedCategory.categoryName : DEFAULT_CATEGORY_NAME;
+            
+            if (oldChannel && 
+                oldChannel.name !== CREATE_CHANNEL_NAME && 
+                oldChannel.parent?.name === categoryName &&
+                oldChannel.members.size === 0) {
+                
+                const channelId = oldChannel.id;
+                const channelName = oldChannel.name;
+                
+                // Cancel any existing deletion timeout for this channel
+                if (deletionTimeouts.has(channelId)) {
+                    clearTimeout(deletionTimeouts.get(channelId));
+                    deletionTimeouts.delete(channelId);
+                    debugLog(`🔄 Cancelled previous deletion timer for ${channelName}`);
+                }
+                
+                debugLog(`🕐 Scheduling deletion of empty crew: ${channelName} in ${DELETE_DELAY}ms`);
+                
+                const timeout = setTimeout(async () => {
+                    deletionTimeouts.delete(channelId); // Remove from tracking
+                    await safeDeleteChannel(oldChannel, `empty after ${DELETE_DELAY}ms`);
+                }, DELETE_DELAY);
+                
+                deletionTimeouts.set(channelId, timeout);
+            }
+        }
+
+    } catch (error) {
+        console.error('❌ Error in voiceStateUpdate:', error);
+        // Always remove creation lock on error
+        creationLocks.delete(userKey);
+    }
+});
+
+// Handle category moves - sync to database when category is moved/renamed
+client.on('channelUpdate', async (oldChannel, newChannel) => {
+    try {
+        // Check if this is a category update
+        if (newChannel.type === ChannelType.GuildCategory) {
+            const guildId = newChannel.guild.id;
+            const savedCategory = await getCategoryForGuild(guildId);
+            
+            // If this is our saved category and it was moved/renamed
+            if (savedCategory && savedCategory.categoryId === newChannel.id) {
+                if (savedCategory.categoryName !== newChannel.name) {
+                    await updateCategoryForGuild(guildId, newChannel.id, newChannel.name);
+                    log(`📁 Category renamed and synced: ${savedCategory.categoryName} → ${newChannel.name}`);
+                }
+            }
+        }
+    } catch (error) {
+        console.error('❌ Error handling category update:', error);
+    }
+});
+
+// Channel deletion handler to clean up our tracking
+client.on('channelDelete', (channel) => {
+    try {
+        // Clean up any pending deletion timeouts
+        if (deletionTimeouts.has(channel.id)) {
+            clearTimeout(deletionTimeouts.get(channel.id));
+            deletionTimeouts.delete(channel.id);
+            debugLog(`🧹 Cleaned up deletion timeout for deleted channel: ${channel.name}`);
+        }
+        
+        // Clean up any active voice connections
+        if (activeConnections.has(channel.id)) {
+            const connection = activeConnections.get(channel.id);
+            try {
+                connection.destroy();
+            } catch (error) {
+                // Ignore errors on cleanup
+            }
+            activeConnections.delete(channel.id);
+            debugLog(`🧹 Cleaned up voice connection for deleted channel: ${channel.name}`);
+        }
+    } catch (error) {
+        debugLog(`⚠️ Error in channelDelete handler: ${error.message}`);
+    }
+});
+
+// Slash command handler
+client.on('interactionCreate', async (interaction) => {
+    if (!interaction.isChatInputCommand()) return;
+
+    const { commandName } = interaction;
+
+    try {
+        if (commandName === 'check-voice-time') {
+            const targetUser = interaction.options.getUser('user') || interaction.user;
+            const voiceData = await voiceTimeTracker.getUserVoiceTime(targetUser.id, interaction.guild.id);
+            
+            if (!voiceData || voiceData.total_seconds === 0) {
+                await interaction.reply({
+                    content: `📊 ${targetUser.displayName} has no recorded voice time in this server.`,
+                    ephemeral: true
+                });
+                return;
+            }
+
+            const formattedTime = voiceTimeTracker.formatTime(voiceData.total_seconds);
+            const lastActive = new Date(voiceData.last_updated).toLocaleDateString();
+
+            const embed = new EmbedBuilder()
+                .setColor('#0099ff')
+                .setTitle('🎤 Voice Time Statistics')
+                .setThumbnail(targetUser.displayAvatarURL())
+                .addFields(
+                    { name: '👤 User', value: targetUser.displayName, inline: true },
+                    { name: '⏱️ Total Voice Time', value: formattedTime, inline: true },
+                    { name: '📅 Last Active', value: lastActive, inline: true }
+                )
+                .setTimestamp()
+                .setFooter({ text: 'One Piece Voice Bot' });
+
+            await interaction.reply({ embeds: [embed] });
+        }
+
+        else if (commandName === 'voice-leaderboard') {
+            const limit = interaction.options.getInteger('limit') || 10;
+            const topUsers = await voiceTimeTracker.getTopVoiceUsers(interaction.guild.id, limit);
+
+            if (topUsers.length === 0) {
+                await interaction.reply({
+                    content: '📊 No voice time data found for this server.',
+                    ephemeral: true
+                });
+                return;
+            }
+
+            const embed = new EmbedBuilder()
+                .setColor('#FFD700')
+                .setTitle('🏆 Voice Time Leaderboard')
+                .setDescription(`Top ${topUsers.length} voice users in ${interaction.guild.name}`)
+                .setTimestamp()
+                .setFooter({ text: 'One Piece Voice Bot' });
+
+            let description = '';
+            topUsers.forEach((user, index) => {
+                const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : `${index + 1}.`;
+                const formattedTime = voiceTimeTracker.formatTime(user.total_seconds);
+                description += `${medal} **${user.username}** - ${formattedTime}\n`;
+            });
+
+            embed.addFields({ name: '🎤 Rankings', value: description });
+
+            await interaction.reply({ embeds: [embed] });
+        }
+
+        else if (commandName === 'bot-info') {
+            const uptime = process.uptime();
+            const hours = Math.floor(uptime / 3600);
+            const minutes = Math.floor((uptime % 3600) / 60);
+
+            const embed = new EmbedBuilder()
+                .setColor('#FF6B6B')
+                .setTitle('🏴‍☠️ One Piece Voice Bot Info')
+                .addFields(
+                    { name: '⚓ Servers', value: `${client.guilds.cache.size}`, inline: true },
+                    { name: '👤 Active Voice Sessions', value: `${voiceTimeTracker.getActiveSessionsCount()}`, inline: true },
+                    { name: '🎵 Audio Connections', value: `${activeConnections.size}`, inline: true },
+                    { name: '⏰ Uptime', value: `${hours}h ${minutes}m`, inline: true },
+                    { name: '🗄️ Database', value: 'Connected', inline: true },
+                    { name: '🎤 Features', value: 'Dynamic Channels, Voice Tracking, Welcome Sounds', inline: false }
+                )
+                .setTimestamp()
+                .setFooter({ text: 'One Piece Voice Bot' });
+
+            await interaction.reply({ embeds: [embed] });
+        }
+
+    } catch (error) {
+        console.error('❌ Error handling slash command:', error);
+        if (!interaction.replied) {
+            await interaction.reply({
+                content: '❌ An error occurred while processing this command.',
+                ephemeral: true
+            });
+        }
+    }
+});
+
+// Legacy message commands and testing commands
+client.on('messageCreate', async (message) => {
+    if (message.author.bot) return;
+    
+    // Voice stats command (legacy)
+    if (message.content === '!voicestats' || message.content === '!stats') {
+        try {
+            const voiceData = await voiceTimeTracker.getUserVoiceTime(message.author.id, message.guild.id);
+            if (voiceData && voiceData.total_seconds > 0) {
+                const formattedTime = voiceTimeTracker.formatTime(voiceData.total_seconds);
+                message.reply(`📊 **${message.author.displayName}'s Voice Time**\n⏱️ **Total:** ${formattedTime}\n💡 Use \`/check-voice-time\` for better formatting!`);
+            } else {
+                message.reply('📊 No voice time recorded! Join some voice channels to start tracking! 🎤');
+            }
+        } catch (error) {
+            console.error('❌ Error getting voice stats:', error);
+            message.reply('❌ Error retrieving voice stats. Please try again later.');
+        }
+    }
+
+    // Debug creation locks command
+    if (message.content === '!locks') {
+        if (!message.member.permissions.has(PermissionFlagsBits.ManageChannels)) {
+            return message.reply('❌ You need Manage Channels permission!');
+        }
+        
+        const lockCount = creationLocks.size;
+        const timeoutCount = deletionTimeouts.size;
+        const connectionCount = activeConnections.size;
+        
+        message.reply(`🔒 **Debug Status:**
+**Creation Locks:** ${lockCount}
+**Deletion Timeouts:** ${timeoutCount}
+**Active Connections:** ${connectionCount}
+**Active Voice Sessions:** ${voiceTimeTracker ? voiceTimeTracker.getActiveSessionsCount() : 0}`);
+    }
+
+    // Clear locks command (emergency)
+    if (message.content === '!clearlocks') {
+        if (!message.member.permissions.has(PermissionFlagsBits.Administrator)) {
+            return message.reply('❌ You need Administrator permission!');
+        }
+        
+        const lockCount = creationLocks.size;
+        const timeoutCount = deletionTimeouts.size;
+        
+        creationLocks.clear();
+        deletionTimeouts.forEach(timeout => clearTimeout(timeout));
+        deletionTimeouts.clear();
+        
+        message.reply(`🧹 **Cleared debug state:**
+**Removed ${lockCount} creation locks**
+**Cancelled ${timeoutCount} deletion timeouts**
+**✅ Bot state reset**`);
+    }
+
+    // Test voice logging command
+    if (message.content === '!testlog') {
+        if (!message.member.permissions.has(PermissionFlagsBits.ManageChannels)) {
+            return message.reply('❌ You need Manage Channels permission to test logging!');
+        }
+
+        try {
+            // Test if the channel exists
+            const channelId = process.env.VOICE_LOG_CHANNEL_ID;
+            if (!channelId) {
+                return message.reply('❌ VOICE_LOG_CHANNEL_ID not set in environment variables!');
+            }
+
+            const testChannel = message.guild.channels.cache.get(channelId);
+            if (!testChannel) {
+                return message.reply(`❌ Channel with ID ${channelId} not found in this server!`);
+            }
+
+            // Test sending a message
+            await testChannel.send('🧪 **Test Message** - Voice logging should work if you can see this!');
+            
+            // Test sending an embed (like the voice logs)
+            const testEmbed = new EmbedBuilder()
+                .setColor('#00FF00')
+                .setTitle('🧪 Test Voice Log')
+                .setDescription(`<@${message.author.id}> joined <#${message.channel.id}>`)
+                .addFields(
+                    { name: '👤 User', value: message.author.displayName, inline: true },
+                    { name: '🏠 Channel', value: 'Test Channel', inline: true }
+                )
+                .setTimestamp()
+                .setFooter({ text: 'Voice Activity Logger - TEST' });
+
+            await testChannel.send({ embeds: [testEmbed] });
+            
+            message.reply(`✅ Test successful! Check ${testChannel} for test messages.`);
+        } catch (error) {
+            message.reply(`❌ Error testing channel: ${error.message}`);
+            console.error('Test log error:', error);
+        }
+    }
+
+    // Debug voice logging status
+    if (message.content === '!debuglog') {
+        if (!message.member.permissions.has(PermissionFlagsBits.ManageChannels)) {
+            return message.reply('❌ You need Manage Channels permission!');
+        }
+
+        const status = `🔍 **Voice Logging Debug Info:**
+**Enabled:** ${process.env.ENABLE_VOICE_LOGGING}
+**Channel ID:** ${process.env.VOICE_LOG_CHANNEL_ID || 'Not set'}
+**Channel Name Fallback:** ${process.env.VOICE_LOG_CHANNEL || 'voice-activity-log'}
+**Voice Tracker Active:** ${voiceTimeTracker ? 'Yes' : 'No'}
+**Active Sessions:** ${voiceTimeTracker ? voiceTimeTracker.getActiveSessionsCount() : 0}`;
+
+        message.reply(status);
+    }
+
+    // Force test voice event
+    if (message.content === '!forcelog') {
+        if (!message.member.permissions.has(PermissionFlagsBits.ManageChannels)) {
+            return message.reply('❌ You need Manage Channels permission!');
+        }
+
+        try {
+            // Manually trigger a voice log event
+            await voiceTimeTracker.channelLogger.logVoiceEvent(
+                message.guild.id,
+                message.author.id,
+                message.author.displayName,
+                message.channel.id,
+                message.channel.name,
+                'JOIN',
+                {}
+            );
+            message.reply('🧪 Forced voice log event sent!');
+        } catch (error) {
+            message.reply(`❌ Error: ${error.message}`);
+            console.error('Force log error:', error);
+        }
+    }
+
+    // Command to create voice log channel
+    if (message.content === '!createvoicelog') {
+        if (!message.member.permissions.has(PermissionFlagsBits.ManageChannels)) {
+            return message.reply('❌ You need Manage Channels permission to create the voice log channel!');
+        }
+
+        try {
+            const newChannel = await voiceTimeTracker.createLogChannel(message.guild);
+            if (newChannel) {
+                message.reply(`✅ Created voice log channel: ${newChannel}\n🔍 Voice activity will now be logged here!`);
+            } else {
+                message.reply('❌ Error creating voice log channel. Please check bot permissions.');
+            }
+        } catch (error) {
+            console.error('❌ Error creating voice log channel:', error);
+            message.reply('❌ Error creating voice log channel. Please check bot permissions.');
+        }
+    }
+    
+    // Ping command
+    if (message.content === '!ping') {
+        const ping = Date.now() - message.createdTimestamp;
+        message.reply(`🏴‍☠️ **Pong!** 
+📡 Bot Latency: \`${ping}ms\`
+💓 API Latency: \`${Math.round(client.ws.ping)}ms\`
+⚓ Ready to set sail!`);
+    }
+    
+    // Test sound command
+    if (message.content === '!testsound') {
+        if (!message.member.voice.channel) {
+            return message.reply('❌ You need to be in a voice channel to test the sound!');
+        }
+        
+        message.reply('🎵 Testing welcome sound...');
+        playWelcomeSound(message.member.voice.channel);
+    }
+    
+    // Check sound file command
+    if (message.content === '!checksound') {
+        if (fs.existsSync(WELCOME_SOUND)) {
+            const stats = fs.statSync(WELCOME_SOUND);
+            message.reply(`✅ **Sound file found!**
+📁 **Path:** \`${WELCOME_SOUND}\`
+📏 **Size:** ${(stats.size / 1024 / 1024).toFixed(2)} MB
+🔊 **Volume:** ${Math.round(AUDIO_VOLUME * 100)}%`);
+        } else {
+            message.reply(`❌ **Sound file NOT found!**
+📁 **Expected path:** \`${WELCOME_SOUND}\`
+💡 **Solution:** Create a 'sounds' folder and add 'The Going Merry One Piece.ogg'`);
+        }
+    }
+    
+    // Help command
+    if (message.content === '!help') {
+        message.reply(`🏴‍☠️ **One Piece Voice Bot Commands**
+
+**📊 Voice Tracking:**
+\`/check-voice-time [@user]\` - Check voice time for a user (NEW!)
+\`/voice-leaderboard [limit]\` - Show top voice users (NEW!)
+\`/bot-info\` - Show bot information (NEW!)
+\`!voicestats\` - Legacy voice stats command
+\`!ping\` - Check bot latency
+
+**🎵 Audio Testing:**
+\`!testsound\` - Test welcome sound in your current voice channel
+\`!checksound\` - Check if sound file exists and show details
+
+**🔧 Debug Commands:**
+\`!locks\` - Show creation locks and timeouts (Manage Channels required)
+\`!clearlocks\` - Clear all locks and timeouts (Administrator required)
+\`!testlog\` - Test voice logging channel (Manage Channels required)
+\`!debuglog\` - Show voice logging debug info (Manage Channels required)
+\`!forcelog\` - Force send a test voice event (Manage Channels required)
+\`!createvoicelog\` - Create voice log channel (Manage Channels required)
+
+**🚢 How to Use:**
+1. Join "${CREATE_CHANNEL_NAME}" voice channel
+2. Bot will create a new crew with a One Piece themed name
+3. You become the captain with full channel permissions
+4. Bot plays welcome sound (if file exists)
+5. Empty crews are automatically deleted after ${DELETE_DELAY/1000} seconds
+6. Voice time is automatically tracked!
+
+**🎯 Key Fixes:**
+• **Duplicate channel creation prevention** - Uses creation locks
+• **Safe channel deletion** - Handles "Unknown Channel" errors
+• **Race condition protection** - Triple-checks user state
+• **Memory leak prevention** - Cleans up timeouts and connections
+• **Better error handling** - Graceful fallbacks for all operations
+
+**💡 Use slash commands (/) for the best experience!**
+**🔍 Voice events are logged to your designated channel with rich embeds!**`);
+    }
+});
+
+// Error handling
+client.on('error', error => {
+    console.error('❌ Discord client error:', error);
+});
+
+client.on('warn', warning => {
+    console.warn('⚠️ Discord client warning:', warning);
+});
+
+process.on('unhandledRejection', error => {
+    console.error('❌ Unhandled promise rejection:', error);
+});
+
+process.on('uncaughtException', error => {
+    console.error('❌ Uncaught exception:', error);
+    process.exit(1);
+});
+
+process.on('SIGINT', gracefulShutdown);
+process.on('SIGTERM', gracefulShutdown);
+
+async function gracefulShutdown() {
+    log('🛑 Shutting down bot gracefully...');
+    
+    try {
+        // Clear all creation locks
+        creationLocks.clear();
+        
+        // Cancel all deletion timeouts
+        deletionTimeouts.forEach(timeout => clearTimeout(timeout));
+        deletionTimeouts.clear();
+        
+        // End all active voice sessions
+        if (voiceTimeTracker) {
+            await voiceTimeTracker.endAllSessions();
+        }
+        
+        // Clean up voice connections
+        log(`🔌 Cleaning up ${activeConnections.size} voice connections...`);
+        activeConnections.forEach((connection, key) => {
+            try {
+                connection.destroy();
+                debugLog(`🔌 Destroyed connection for ${key}`);
+            } catch (error) {
+                // Ignore errors during shutdown
+            }
+        });
+        activeConnections.clear();
+        
+        // Close database connection
+        log('🗄️ Closing database connection...');
+        if (pool) {
+            await pool.end();
+        }
+        
+        // Destroy Discord client
+        client.destroy();
+        
+        log('👋 Bot shutdown complete!');
+    } catch (error) {
+        console.error('❌ Error during shutdown:', error);
+    }
+    
+    process.exit(0);
+}
+
+// Keep the process alive and log status
+setInterval(() => {
+    if (DEBUG) {
+        const activeSessions = voiceTimeTracker ? voiceTimeTracker.getActiveSessionsCount() : 0;
+        console.log(`🏴‍☠️ Bot Status - Guilds: ${client.guilds.cache.size}, Active Voice Sessions: ${activeSessions}, Audio Connections: ${activeConnections.size}, Creation Locks: ${creationLocks.size}, Deletion Timeouts: ${deletionTimeouts.size}, Uptime: ${Math.floor(process.uptime()/60)}m`);
+    }
+}, 300000); // Log every 5 minutes in debug mode
+
+// Start the bot
+async function startBot() {
+    log('🚀 Starting One Piece Dynamic Voice Bot...');
+    log(`🔑 Discord Token: ${DISCORD_TOKEN ? '✅ Provided' : '❌ MISSING'}`);
+    log(`🆔 Client ID: ${CLIENT_ID ? '✅ Provided' : '❌ MISSING'}`);
+    log(`🗄️ Database URL: ${process.env.DATABASE_URL ? '✅ Provided' : '❌ MISSING'}`);
+
+    if (!DISCORD_TOKEN) {
+        console.error('❌ DISCORD_TOKEN is required! Please check your .env file.');
+        process.exit(1);
+    }
+
+    if (!CLIENT_ID) {
+        console.error('❌ CLIENT_ID is required for slash commands! Please check your .env file.');
+        process.exit(1);
+    }
+
+    if (!process.env.DATABASE_URL) {
+        console.error('❌ DATABASE_URL is required! Please check your .env file.');
+        process.exit(1);
+    }
+
+    try {
+        await client.login(DISCORD_TOKEN);
+    } catch (error) {
+        console.error('❌ Failed to login to Discord:', error);
+        process.exit(1);
+    }
+}
+
+// Start the bot
+startBot();
