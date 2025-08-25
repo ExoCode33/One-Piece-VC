@@ -1,10 +1,8 @@
 // src/index.js
-// Discord.js v14 dynamic voice channel manager (duplicate-proof) + welcome sound join
-// -----------------------------------------------------------------------------------
+// Dynamic VC manager (duplicate-proof) + welcome sound join (OGG, no fallbacks)
 
 require('dotenv').config();
 const path = require('node:path');
-const fs = require('node:fs');
 
 const {
   Client,
@@ -31,11 +29,12 @@ const CREATE_CHANNEL_NAME = process.env.CREATE_CHANNEL_NAME || '🏴〢Set Sail 
 const VOICE_CATEGORY_ID = process.env.VOICE_CATEGORY_ID || null;
 const LOG_CHANNEL_ID = process.env.LOG_CHANNEL_ID || null;
 
-const WELCOME_SOUND_PATH =
-  process.env.WELCOME_SOUND_PATH || path.resolve(__dirname, 'assets/welcome.mp3');
+// Fixed welcome sound path (no fallback)
+const WELCOME_SOUND_PATH = path.resolve(process.cwd(), 'sounds', 'The Going Merry One Piece.ogg');
+
+// Tuning
 const WELCOME_COOLDOWN_MS = Number(process.env.WELCOME_COOLDOWN_MS || 10000);
 const STAY_AFTER_WELCOME = String(process.env.STAY_AFTER_WELCOME || 'false').toLowerCase() === 'true';
-
 const DELETE_DELAY = Number(process.env.DELETE_DELAY_MS || 1500);
 const DEBUG = String(process.env.DEBUG_VC || 'true').toLowerCase() !== 'false';
 
@@ -128,10 +127,6 @@ function shouldPlayWelcome(channelId) {
 async function playWelcomeIfConfigured(channel) {
   try {
     if (!channel || channel.type !== ChannelType.GuildVoice) return;
-    if (!WELCOME_SOUND_PATH || !fs.existsSync(WELCOME_SOUND_PATH)) {
-      debugLog(`🎵 Skipping welcome: file missing at ${WELCOME_SOUND_PATH}`);
-      return;
-    }
     if (!shouldPlayWelcome(channel.id)) {
       debugLog(`🎵 Welcome on cooldown for ${channel.name}`);
       return;
@@ -153,7 +148,7 @@ async function playWelcomeIfConfigured(channel) {
     activeConnections.set(channel.id, connection);
 
     const player = createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Stop } });
-    const resource = createAudioResource(WELCOME_SOUND_PATH);
+    const resource = createAudioResource(WELCOME_SOUND_PATH); // OGG file
 
     connection.subscribe(player);
     player.play(resource);
