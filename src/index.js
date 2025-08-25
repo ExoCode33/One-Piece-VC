@@ -762,13 +762,15 @@ client.on('interactionCreate', async (interaction) => {
 
     try {
         if (commandName === 'check-voice-time') {
+            // Defer reply immediately to prevent timeout
+            await interaction.deferReply();
+
             const targetUser = interaction.options.getUser('user') || interaction.user;
             const voiceData = await voiceTimeTracker.getUserVoiceTime(targetUser.id, interaction.guild.id);
             
             if (!voiceData || voiceData.total_seconds === 0) {
-                await interaction.reply({
-                    content: `📊 ${targetUser.displayName} has no recorded voice time in this server.`,
-                    ephemeral: true
+                await interaction.editReply({
+                    content: `📊 ${targetUser.displayName} has no recorded voice time in this server.`
                 });
                 return;
             }
@@ -788,70 +790,86 @@ client.on('interactionCreate', async (interaction) => {
                 .setTimestamp()
                 .setFooter({ text: 'One Piece Voice Bot' });
 
-            await interaction.reply({ embeds: [embed] });
+            await interaction.editReply({ embeds: [embed] });
         }
 
         else if (commandName === 'voice-leaderboard') {
-            // NEW: Check admin permissions for leaderboard
+            // NEW: Check admin permissions for leaderboard BEFORE deferring
             if (!hasAdminPermissions(interaction.member)) {
                 await interaction.reply({
                     content: '❌ You need administrator permissions or the admin role to use this command!',
-                    ephemeral: true
+                    flags: 64 // InteractionResponseFlags.Ephemeral
                 });
                 return;
             }
+
+            // Defer reply immediately to prevent timeout
+            await interaction.deferReply();
 
             const limit = interaction.options.getInteger('limit') || 10;
             
-            // FIXED: Get fresh data from database each time
-            const topUsers = await voiceTimeTracker.getTopVoiceUsers(interaction.guild.id, limit);
+            try {
+                // FIXED: Get fresh data from database each time
+                const topUsers = await voiceTimeTracker.getTopVoiceUsers(interaction.guild.id, limit);
 
-            if (topUsers.length === 0) {
-                await interaction.reply({
-                    content: '📊 No voice time data found for this server.',
-                    ephemeral: true
-                });
-                return;
-            }
-
-            const embed = new EmbedBuilder()
-                .setColor('#FFD700')
-                .setTitle('🏆 Voice Time Leaderboard')
-                .setDescription(`Top ${topUsers.length} voice users in ${interaction.guild.name}`)
-                .setTimestamp()
-                .setFooter({ text: 'One Piece Voice Bot' });
-
-            let description = '';
-            for (let i = 0; i < topUsers.length; i++) {
-                const user = topUsers[i];
-                const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `${i + 1}.`;
-                const formattedTime = voiceTimeTracker.formatTime(user.total_seconds);
-                
-                // Try to get the actual Discord user to get updated display name
-                let displayName = user.username;
-                try {
-                    const discordUser = await interaction.guild.members.fetch(user.user_id);
-                    if (discordUser) {
-                        displayName = discordUser.displayName;
-                        // Update username in database if it changed
-                        if (displayName !== user.username) {
-                            await voiceTimeTracker.updateUsername(user.user_id, interaction.guild.id, displayName);
-                        }
-                    }
-                } catch (fetchError) {
-                    // User might have left the server, keep stored username
-                    debugLog(`Could not fetch user ${user.user_id}: ${fetchError.message}`);
+                if (topUsers.length === 0) {
+                    await interaction.editReply({
+                        content: '📊 No voice time data found for this server.'
+                    });
+                    return;
                 }
-                
-                description += `${medal} **${displayName}** - ${formattedTime}\n`;
+
+                const embed = new EmbedBuilder()
+                    .setColor('#FFD700')
+                    .setTitle('🏆 Voice Time Leaderboard')
+                    .setDescription(`Top ${topUsers.length} voice users in ${interaction.guild.name}`)
+                    .setTimestamp()
+                    .setFooter({ text: 'One Piece Voice Bot' });
+
+                let description = '';
+                for (let i = 0; i < topUsers.length; i++) {
+                    const user = topUsers[i];
+                    const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `${i + 1}.`;
+                    const formattedTime = voiceTimeTracker.formatTime(user.total_seconds);
+                    
+                    // Try to get the actual Discord user to get updated display name
+                    let displayName = user.username;
+                    try {
+                        const discordUser = await interaction.guild.members.fetch(user.user_id);
+                        if (discordUser) {
+                            displayName = discordUser.displayName;
+                            // Update username in database if it changed
+                            if (displayName !== user.username) {
+                                // Don't await this to speed up the response
+                                voiceTimeTracker.updateUsername(user.user_id, interaction.guild.id, displayName).catch(err => {
+                                    debugLog(`Error updating username: ${err.message}`);
+                                });
+                            }
+                        }
+                    } catch (fetchError) {
+                        // User might have left the server, keep stored username
+                        debugLog(`Could not fetch user ${user.user_id}: ${fetchError.message}`);
+                    }
+                    
+                    description += `${medal} **${displayName}** - ${formattedTime}\n`;
+                }
+
+                embed.addFields({ name: '🎤 Rankings', value: description });
+
+                await interaction.editReply({ embeds: [embed] });
+
+            } catch (error) {
+                console.error('❌ Error in leaderboard command:', error);
+                await interaction.editReply({
+                    content: '❌ An error occurred while fetching the leaderboard. Please try again later.'
+                });
             }
-
-            embed.addFields({ name: '🎤 Rankings', value: description });
-
-            await interaction.reply({ embeds: [embed] });
         }
 
         else if (commandName === 'bot-info') {
+            // Defer reply immediately to prevent timeout
+            await interaction.deferReply();
+
             const uptime = process.uptime();
             const hours = Math.floor(uptime / 3600);
             const minutes = Math.floor((uptime % 3600) / 60);
@@ -870,16 +888,26 @@ client.on('interactionCreate', async (interaction) => {
                 .setTimestamp()
                 .setFooter({ text: 'One Piece Voice Bot' });
 
-            await interaction.reply({ embeds: [embed] });
+            await interaction.editReply({ embeds: [embed] });
         }
 
     } catch (error) {
         console.error('❌ Error handling slash command:', error);
-        if (!interaction.replied) {
-            await interaction.reply({
-                content: '❌ An error occurred while processing this command.',
-                ephemeral: true
-            });
+        
+        // Handle different error states
+        try {
+            if (!interaction.replied && !interaction.deferred) {
+                await interaction.reply({
+                    content: '❌ An error occurred while processing this command.',
+                    flags: 64 // InteractionResponseFlags.Ephemeral
+                });
+            } else if (interaction.deferred) {
+                await interaction.editReply({
+                    content: '❌ An error occurred while processing this command.'
+                });
+            }
+        } catch (followupError) {
+            console.error('❌ Error sending error response:', followupError);
         }
     }
 });
