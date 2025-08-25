@@ -534,6 +534,12 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
 
         // ONLY HANDLE: Dynamic Voice Channel Creation
         if (newState.channelId && newState.channel?.name === CREATE_CHANNEL_NAME) {
+            // Don't process if user is a bot
+            if (member.user.bot) {
+                debugLog(`🤖 Bot user ${member.displayName} joined trigger channel, ignoring`);
+                return;
+            }
+            
             // Check if user is already being processed
             if (processingUsers.has(userId)) {
                 debugLog(`🚫 User ${member.displayName} is already being processed, skipping duplicate creation`);
@@ -640,10 +646,11 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
                         await member.voice.setChannel(newChannel);
                         debugLog(`✅ Successfully moved ${member.displayName} to ${crewName}`);
                         
-                        // Play welcome sound immediately after moving user
-                        log(`🎵 Playing welcome sound in ${crewName}...`);
+                        // Play welcome sound after a short delay
                         setTimeout(() => {
-                            playWelcomeSound(newChannel);
+                            if (newChannel.members.size > 0) { // Only play if channel still has members
+                                playWelcomeSound(newChannel);
+                            }
                         }, 1500);
                         
                     } else {
@@ -684,7 +691,8 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
         }
 
         // ONLY HANDLE: Auto-delete empty dynamic channels (only bot-created ones)
-        if (oldState.channelId) {
+        if (oldState.channelId && !newState.channelId) {
+            // User completely left voice (not just moved between channels)
             const oldChannel = oldState.channel;
             
             // Check if this channel should be deleted
