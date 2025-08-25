@@ -523,43 +523,65 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
     const member = newState.member;
     const guildId = newState.guild.id;
 
+    // Add comprehensive debugging
+    debugLog(`Voice State Update - User: ${member?.displayName || 'Unknown'}`);
+    debugLog(`  Old Channel: ${oldState.channel?.name || 'None'} (${oldState.channelId || 'None'})`);
+    debugLog(`  New Channel: ${newState.channel?.name || 'None'} (${newState.channelId || 'None'})`);
+    debugLog(`  Currently Processing: ${processingUsers.has(userId) ? 'YES' : 'NO'}`);
+
     try {
-        // REMOVED: Voice time tracking is now handled ONLY by voiceTimeTracker
-        // This was causing duplicate logs because both systems were listening to the same event
-        
-        // Let VoiceTimeTracker handle all voice logging
+        // Let VoiceTimeTracker handle all voice logging FIRST
         if (voiceTimeTracker) {
             await voiceTimeTracker.handleVoiceStateUpdate(oldState, newState);
         }
 
         // ONLY HANDLE: Dynamic Voice Channel Creation
         if (newState.channelId && newState.channel?.name === CREATE_CHANNEL_NAME) {
+            debugLog(`🎯 User joined trigger channel: ${CREATE_CHANNEL_NAME}`);
+            
             // Don't process if user is a bot
             if (member.user.bot) {
                 debugLog(`🤖 Bot user ${member.displayName} joined trigger channel, ignoring`);
                 return;
             }
             
-            // Check if user is already being processed
+            // STRONGER duplicate prevention
             if (processingUsers.has(userId)) {
-                debugLog(`🚫 User ${member.displayName} is already being processed, skipping duplicate creation`);
+                debugLog(`🚫 User ${member.displayName} is ALREADY being processed, ABORTING duplicate creation`);
                 return;
             }
 
-            // Add user to processing set to prevent duplicates
+            // Double-check: if user is already in a bot-created channel, don't process
+            const userCurrentChannel = member.voice.channel;
+            if (userCurrentChannel && isBotCreatedChannel(guildId, userCurrentChannel.id)) {
+                debugLog(`🚫 User ${member.displayName} is already in a bot-created channel: ${userCurrentChannel.name}, ignoring trigger`);
+                return;
+            }
+
+            debugLog(`✅ Starting channel creation process for ${member.displayName}`);
+
+            // Add user to processing set IMMEDIATELY
             processingUsers.add(userId);
+            debugLog(`🔒 LOCKED user ${userId} in processing set (size now: ${processingUsers.size})`);
             
             // Set timeout to remove user from processing set in case something goes wrong
             const timeoutId = setTimeout(() => {
                 processingUsers.delete(userId);
-                debugLog(`⏰ Removed ${userId} from processing set due to timeout`);
-            }, 10000); // 10 second timeout
+                debugLog(`⏰ TIMEOUT: Removed ${userId} from processing set due to timeout (size now: ${processingUsers.size})`);
+            }, 15000); // Increased timeout to 15 seconds
 
             try {
                 const guild = newState.guild;
                 
+                // Double-check user is still in voice
                 if (!member.voice.channelId) {
-                    debugLog(`User ${member.displayName} no longer in voice, skipping channel creation`);
+                    debugLog(`❌ User ${member.displayName} no longer in voice, aborting channel creation`);
+                    return;
+                }
+
+                // Triple-check user is still in the trigger channel
+                if (member.voice.channel?.name !== CREATE_CHANNEL_NAME) {
+                    debugLog(`❌ User ${member.displayName} no longer in trigger channel, aborting channel creation`);
                     return;
                 }
                 
@@ -614,13 +636,23 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
                 }
 
                 const crewName = getRandomCrewName();
+                debugLog(`🎲 Selected crew name: ${crewName}`);
                 
+                // Final check before channel creation
+                if (!member.voice.channelId || member.voice.channel?.name !== CREATE_CHANNEL_NAME) {
+                    debugLog(`❌ Final check failed - user moved or disconnected, aborting`);
+                    return;
+                }
+
                 // Create the new voice channel with basic setup first
+                debugLog(`🏗️ Creating new voice channel: ${crewName}`);
                 const newChannel = await guild.channels.create({
                     name: crewName,
                     type: ChannelType.GuildVoice,
                     parent: category.id,
                 });
+
+                debugLog(`✅ Channel created successfully: ${newChannel.name} (${newChannel.id})`);
 
                 // Add the newly created channel to bot-created tracking
                 addBotCreatedChannel(guildId, newChannel.id);
@@ -642,19 +674,24 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
                 log(`👑 ${member.displayName} is now captain of ${crewName}`);
 
                 try {
-                    if (member.voice.channelId) {
+                    // Final check before moving user
+                    if (member.voice.channelId && member.voice.channel?.name === CREATE_CHANNEL_NAME) {
+                        debugLog(`🚀 Moving user ${member.displayName} to ${crewName}`);
                         await member.voice.setChannel(newChannel);
                         debugLog(`✅ Successfully moved ${member.displayName} to ${crewName}`);
                         
-                        // Play welcome sound after a short delay
+                        // Play welcome sound after a short delay, only if channel has members
                         setTimeout(() => {
-                            if (newChannel.members.size > 0) { // Only play if channel still has members
+                            if (newChannel.members.size > 0) {
+                                log(`🎵 Playing welcome sound in ${crewName}...`);
                                 playWelcomeSound(newChannel);
+                            } else {
+                                debugLog(`🚫 Channel ${crewName} is empty, skipping welcome sound`);
                             }
                         }, 1500);
                         
                     } else {
-                        debugLog(`User ${member.displayName} disconnected before move, cleaning up channel`);
+                        debugLog(`❌ User ${member.displayName} disconnected or moved before we could move them, cleaning up channel`);
                         setTimeout(async () => {
                             try {
                                 if (newChannel.members.size === 0) {
@@ -686,7 +723,8 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
                 // Always clear the timeout and remove user from processing set
                 clearTimeout(timeoutId);
                 processingUsers.delete(userId);
-                debugLog(`✅ Finished processing user ${member.displayName}, removed from processing set`);
+                debugLog(`🔓 UNLOCKED user ${userId} from processing set (size now: ${processingUsers.size})`);
+                debugLog(`✅ Finished processing user ${member.displayName}`);
             }
         }
 
@@ -694,6 +732,8 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
         if (oldState.channelId && !newState.channelId) {
             // User completely left voice (not just moved between channels)
             const oldChannel = oldState.channel;
+            
+            debugLog(`👋 User ${member?.displayName} completely left voice from ${oldChannel?.name}`);
             
             // Check if this channel should be deleted
             const shouldDelete = oldChannel && 
@@ -743,6 +783,7 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
         console.error('❌ Error in voiceStateUpdate:', error);
         // Make sure to remove user from processing set if an error occurs
         processingUsers.delete(userId);
+        debugLog(`🔓 ERROR CLEANUP: Removed user ${userId} from processing set due to error`);
     }
 });
 
