@@ -498,31 +498,25 @@ client.once('ready', async () => {
 
 // Voice state update handler
 client.on('voiceStateUpdate', async (oldState, newState) => {
+    // Skip all bot voice state changes (including our own bot)
+    if (newState.member?.user.bot || oldState.member?.user.bot) {
+        debugLog(`🤖 Ignoring bot voice state change: ${newState.member?.user.username || oldState.member?.user.username}`);
+        return;
+    }
+
     const userId = newState.id;
     const member = newState.member;
     const guildId = newState.guild.id;
     const userKey = `${guildId}-${userId}`;
 
     try {
-        // Handle voice time tracking
+        // Handle voice time tracking (now guaranteed to be human users only)
         if (voiceTimeTracker) {
             await voiceTimeTracker.handleVoiceStateUpdate(oldState, newState);
         }
 
         // Dynamic Voice Channel Creation
-        if (newState.channelId && newState.channel?.name === CREATE_CHANNEL_NAME) {
-            
-            // Prevent duplicate channel creation
-            if (creationLocks.has(userKey)) {
-                debugLog(`🔒 User ${member.displayName} already creating a channel, ignoring duplicate`);
-                return;
-            }
-            
-            // Add lock to prevent duplicates
-            creationLocks.add(userKey);
-            
-            try {
-                const guild = newState.guild;
+        if (newState.channelId && newState.channel?.name === CREATE_CHANNEL_NAME)
                 
                 // Double-check user is still in voice
                 if (!member.voice.channelId) {
@@ -615,12 +609,14 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
                 const currentMember = await guild.members.fetch(member.id);
                 if (currentMember.voice.channelId) {
                     try {
+                        log(`🔄 Moving ${member.displayName} from ${currentMember.voice.channel.name} to ${crewName}`);
                         await currentMember.voice.setChannel(newChannel);
-                        debugLog(`✅ Successfully moved ${member.displayName} to ${crewName}`);
+                        log(`✅ Successfully moved ${member.displayName} to ${crewName}`);
                         
                         // Play welcome sound immediately after moving user
-                        log(`🎵 Playing welcome sound in ${crewName}...`);
+                        log(`🎵 Scheduling welcome sound for ${crewName} in 1.5 seconds...`);
                         setTimeout(() => {
+                            log(`🎵 Now playing welcome sound in ${crewName}`);
                             playWelcomeSound(newChannel);
                         }, 1500);
                         
@@ -638,7 +634,7 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
                 // Always remove the creation lock
                 setTimeout(() => {
                     creationLocks.delete(userKey);
-                    debugLog(`🔓 Removed creation lock for ${member.displayName}`);
+                    log(`🔓 Removed creation lock for ${member.displayName}`);
                 }, 2000); // Keep lock for 2 seconds to prevent rapid recreations
             }
         }
