@@ -32,9 +32,6 @@ let voiceTimeTracker;
 // FIXED: Track users who are currently being processed to prevent duplicate channels
 const processingUsers = new Set();
 
-// NEW: Global rate limiting for channel creation per guild
-const lastChannelCreation = new Map(); // guildId -> timestamp
-
 async function initializeConnection() {
     // Railway PostgreSQL connection
     if (process.env.DATABASE_URL) {
@@ -548,19 +545,7 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
                 return;
             }
             
-            // AGGRESSIVE duplicate prevention - check if ANY user is being processed for this guild
-            const guildProcessingUsers = Array.from(processingUsers).filter(id => {
-                const guildMember = newState.guild.members.cache.get(id);
-                return guildMember !== undefined;
-            });
-            
-            if (guildProcessingUsers.length > 0) {
-                debugLog(`🚫 Guild ${guildId} already has ${guildProcessingUsers.length} users being processed, BLOCKING new creation for ${member.displayName}`);
-                debugLog(`🚫 Users being processed: ${guildProcessingUsers.join(', ')}`);
-                return;
-            }
-            
-            // Check if user is already being processed
+            // STRONGER duplicate prevention
             if (processingUsers.has(userId)) {
                 debugLog(`🚫 User ${member.displayName} is ALREADY being processed, ABORTING duplicate creation`);
                 return;
@@ -573,40 +558,7 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
                 return;
             }
 
-            // Check if there are recent bot-created channels in this guild (within last 5 seconds)
-            const guildBotChannels = botCreatedChannels.get(guildId) || new Set();
-            let hasRecentChannel = false;
-            
-            for (const channelId of guildBotChannels) {
-                const channel = newState.guild.channels.cache.get(channelId);
-                if (channel) {
-                    const channelAge = Date.now() - channel.createdTimestamp;
-                    if (channelAge < 5000) { // Less than 5 seconds old
-                        hasRecentChannel = true;
-                        debugLog(`🚫 Recent bot channel found: ${channel.name} (${channelAge}ms old), blocking duplicate creation`);
-                        break;
-                    }
-                }
-            }
-            
-            if (hasRecentChannel) {
-                debugLog(`🚫 Recent bot-created channel exists, ignoring trigger for ${member.displayName}`);
-                return;
-            }
-
-            // Guild-wide rate limiting (no more than 1 channel creation per 3 seconds per guild)
-            const lastCreation = lastChannelCreation.get(guildId) || 0;
-            const timeSinceLastCreation = Date.now() - lastCreation;
-            
-            if (timeSinceLastCreation < 3000) { // 3 seconds
-                debugLog(`🚫 Guild rate limit: Only ${timeSinceLastCreation}ms since last creation, need 3000ms. Blocking ${member.displayName}`);
-                return;
-            }
-
-            debugLog(`✅ All checks passed - Starting channel creation process for ${member.displayName}`);
-
-            // Update rate limiting timestamp
-            lastChannelCreation.set(guildId, Date.now());
+            debugLog(`✅ Starting channel creation process for ${member.displayName}`);
 
             // Add user to processing set IMMEDIATELY
             processingUsers.add(userId);
@@ -616,7 +568,7 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
             const timeoutId = setTimeout(() => {
                 processingUsers.delete(userId);
                 debugLog(`⏰ TIMEOUT: Removed ${userId} from processing set due to timeout (size now: ${processingUsers.size})`);
-            }, 15000); // 15 second timeout
+            }, 15000); // Increased timeout to 15 seconds
 
             try {
                 const guild = newState.guild;
