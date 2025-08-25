@@ -457,64 +457,60 @@ client.once('ready', async () => {
     }
 });
 
-// Voice state update handler - ONLY CHANGE IS HERE
+// Voice state update handler with proper event deduplication
 client.on('voiceStateUpdate', async (oldState, newState) => {
+    // Skip all bot voice state changes 
+    if (newState.member?.user.bot || oldState.member?.user.bot) {
+        debugLog(`🤖 Ignoring bot voice state change: ${newState.member?.user.username || oldState.member?.user.username}`);
+        return;
+    }
+
     const userId = newState.id;
     const member = newState.member;
     const guildId = newState.guild.id;
 
+    // CRITICAL: Create a unique event signature to prevent duplicate processing
+    const eventSignature = `${guildId}-${userId}-${oldState.channelId || 'null'}-${newState.channelId || 'null'}-${Date.now()}`;
+    
+    // Store recent event signatures to detect duplicates within 1 second
+    if (!client.recentEvents) client.recentEvents = new Set();
+    
+    // Check for duplicate events within 1000ms
+    const similarEvent = Array.from(client.recentEvents).find(sig => {
+        const [sigGuild, sigUser, sigOld, sigNew, sigTime] = sig.split('-');
+        const timeDiff = Date.now() - parseInt(sigTime);
+        return sigGuild === guildId && 
+               sigUser === userId && 
+               sigOld === (oldState.channelId || 'null') && 
+               sigNew === (newState.channelId || 'null') && 
+               timeDiff < 1000; // Within 1 second
+    });
+
+    if (similarEvent) {
+        debugLog(`🚫 DUPLICATE EVENT: Ignoring duplicate voiceStateUpdate for ${member.displayName}`);
+        return;
+    }
+
+    // Store this event signature
+    client.recentEvents.add(eventSignature);
+    
+    // Clean up old event signatures (older than 5 seconds)
+    setTimeout(() => {
+        client.recentEvents.delete(eventSignature);
+    }, 5000);
+
+    debugLog(`✅ PROCESSING: voiceStateUpdate for ${member.displayName} (${oldState.channel?.name || 'null'} → ${newState.channel?.name || 'null'})`);
+
     try {
-        // Handle voice time tracking - ADD BOT FILTER HERE
-        if (voiceTimeTracker && !member?.user.bot) {
+        // Handle voice time tracking
+        if (voiceTimeTracker) {
             await voiceTimeTracker.handleVoiceStateUpdate(oldState, newState);
         }
 
-        // Check for suspicious channel moves (user moved away from their own channel immediately)
-        if (oldState.channelId && newState.channelId && oldState.channelId !== newState.channelId && !member?.user.bot) {
-            const ownershipKey = `${guildId}-${userId}`;
-            const ownedChannelId = userOwnedChannels.get(ownershipKey);
-            if (ownedChannelId === oldState.channelId) {
-                log(`🚨 SUSPICIOUS: ${member.displayName} was moved away from their own channel ${oldState.channel.name} to ${newState.channel.name}`);
-                
-                // If they were moved to the create channel, move them back to their owned channel
-                if (newState.channel.name === CREATE_CHANNEL_NAME) {
-                    log(`🔄 PROTECTION: Moving ${member.displayName} back to their owned channel`);
-                    try {
-                        setTimeout(async () => {
-                            const ownedChannel = member.guild.channels.cache.get(ownedChannelId);
-                            if (ownedChannel && member.voice.channelId === newState.channelId) {
-                                await member.voice.setChannel(ownedChannel);
-                                log(`✅ Successfully moved ${member.displayName} back to ${ownedChannel.name}`);
-                            }
-                        }, 500);
-                    } catch (error) {
-                        console.error(`❌ Error moving user back to owned channel:`, error);
-                    }
-                }
-            }
-        }
-
         // Dynamic Voice Channel Creation - ONLY PROCESS NON-BOTS
-        if (newState.channelId && newState.channel?.name === CREATE_CHANNEL_NAME && !member?.user.bot) {
+        if (newState.channelId && newState.channel?.name === CREATE_CHANNEL_NAME) {
             
-            debugLog(`🎯 User ${member.displayName} joined CREATE channel: ${CREATE_CHANNEL_NAME}`);
-            
-            // BULLETPROOF: Check lock BEFORE any async operations
-            const lockKey = `${guildId}-${userId}`;
-            if (recentCreations.has(lockKey)) {
-                log(`🔒 BLOCKED: ${member.displayName} already has active creation (preventing duplicate)`);
-                return;
-            }
-            
-            // Add lock IMMEDIATELY - no delays
-            recentCreations.add(lockKey);
-            log(`🔒 INSTANT LOCK: ${member.displayName} creation locked for 10 seconds`);
-            
-            // Remove lock after longer period
-            setTimeout(() => {
-                recentCreations.delete(lockKey);
-                log(`🔓 Released creation lock for ${member.displayName}`);
-            }, 10000); // 10 seconds instead of 5
+            log(`🎯 VALID EVENT: ${member.displayName} joined CREATE channel: ${CREATE_CHANNEL_NAME}`);
             
             const guild = newState.guild;
             
@@ -638,8 +634,8 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
             }
         }
 
-        // Auto-delete empty dynamic channels - ONLY FOR NON-BOTS
-        if (oldState.channelId && !member?.user.bot) {
+        // Auto-delete empty dynamic channels
+        if (oldState.channelId && !newState.channelId) {
             const oldChannel = oldState.channel;
             const savedCategory = await getCategoryForGuild(guildId);
             const categoryName = savedCategory ? savedCategory.categoryName : DEFAULT_CATEGORY_NAME;
