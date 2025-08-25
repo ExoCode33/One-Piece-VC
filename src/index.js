@@ -517,22 +517,19 @@ client.once('ready', async () => {
     }
 });
 
-// FIXED: Voice state update handler - ONLY handles dynamic channel creation, NOT voice logging
+// FIXED: Voice state update handler with duplicate prevention
 client.on('voiceStateUpdate', async (oldState, newState) => {
     const userId = newState.id;
     const member = newState.member;
     const guildId = newState.guild.id;
 
     try {
-        // REMOVED: Voice time tracking is now handled ONLY by voiceTimeTracker
-        // This was causing duplicate logs because both systems were listening to the same event
-        
-        // Let VoiceTimeTracker handle all voice logging
+        // Handle voice time tracking
         if (voiceTimeTracker) {
             await voiceTimeTracker.handleVoiceStateUpdate(oldState, newState);
         }
 
-        // ONLY HANDLE: Dynamic Voice Channel Creation
+        // FIXED: Dynamic Voice Channel Creation with duplicate prevention
         if (newState.channelId && newState.channel?.name === CREATE_CHANNEL_NAME) {
             // Check if user is already being processed
             if (processingUsers.has(userId)) {
@@ -616,7 +613,7 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
                     parent: category.id,
                 });
 
-                // Add the newly created channel to bot-created tracking
+                // NEW: Add the newly created channel to bot-created tracking
                 addBotCreatedChannel(guildId, newChannel.id);
 
                 // Sync permissions with category and add creator permissions
@@ -683,7 +680,7 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
             }
         }
 
-        // ONLY HANDLE: Auto-delete empty dynamic channels (only bot-created ones)
+        // UPDATED: Auto-delete empty dynamic channels (only bot-created ones)
         if (oldState.channelId) {
             const oldChannel = oldState.channel;
             
@@ -825,7 +822,7 @@ client.on('interactionCreate', async (interaction) => {
         }
 
         else if (commandName === 'voice-leaderboard') {
-            // Check admin permissions for leaderboard BEFORE deferring
+            // NEW: Check admin permissions for leaderboard BEFORE deferring
             if (!hasAdminPermissions(interaction.member)) {
                 await interaction.reply({
                     content: '❌ You need administrator permissions or the admin role to use this command!',
@@ -840,7 +837,7 @@ client.on('interactionCreate', async (interaction) => {
             const limit = interaction.options.getInteger('limit') || 10;
             
             try {
-                // Get fresh data from database each time
+                // FIXED: Get fresh data from database each time
                 const topUsers = await voiceTimeTracker.getTopVoiceUsers(interaction.guild.id, limit);
 
                 if (topUsers.length === 0) {
@@ -1098,7 +1095,7 @@ client.on('messageCreate', async (message) => {
         }
     }
 
-    // Debug bot-created channels command
+    // NEW: Debug bot-created channels command
     if (message.content === '!debugchannels') {
         if (!hasAdminPermissions(message.member)) {
             return message.reply('❌ You need administrator permissions to use this command!');
@@ -1152,7 +1149,7 @@ client.on('messageCreate', async (message) => {
         message.reply(response);
     }
 
-    // Clear processing users command (emergency)
+    // NEW: Clear processing users command (emergency)
     if (message.content === '!clearprocessing') {
         if (!hasAdminPermissions(message.member)) {
             return message.reply('❌ You need administrator permissions to use this command!');
@@ -1195,18 +1192,19 @@ client.on('messageCreate', async (message) => {
 6. Voice time is automatically tracked!
 
 **🎯 New Features:**
-• **Fixed Duplicate Logs**: Removed duplicate voice logging system
-• **Single Voice Tracker**: Only VoiceTimeTracker handles voice events now
+• **Duplicate Prevention**: Fixed issue where 2 channels were created
 • **Smart Channel Deletion**: Only deletes bot-created channels
 • **Protected Channels**: Configured channels will never be deleted
 • **Admin-Only Leaderboard**: Leaderboard command requires admin permissions
+• **Fresh Data**: Leaderboard always shows current data from database
+• **Processing Lock**: Prevents multiple channels from being created simultaneously
 
 **💡 Configuration:**
 • Admin Role ID: ${ADMIN_ROLE_ID || 'Not set (Server admins only)'}
 • Protected Channels: ${PROTECTED_CHANNEL_IDS.length} configured
 
 **💡 Use slash commands (/) for the best experience!**
-**🔍 Voice events are logged once per event with rich embeds!**`);
+**🔍 Voice events are logged to your designated channel with rich embeds!**`);
     }
 });
 
