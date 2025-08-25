@@ -657,7 +657,7 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
                             log(`🗑️ Deleted empty bot-created crew: ${oldChannel.name}`);
                         }
                     } catch (error) {
-                        console.error(`❌ Error deleting channel:`, error);
+                        console.error(`❌ Error deleting channel ${oldChannel.name}:`, error);
                     }
                 }, DELETE_DELAY);
             }
