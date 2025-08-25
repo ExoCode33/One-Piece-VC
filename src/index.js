@@ -114,7 +114,6 @@ const client = new Client({
 // Track audio connections and prevent duplicate channel creation
 const activeConnections = new Map(); // channelId -> voice connection
 const recentCreations = new Set(); // userId -> prevent rapid channel creation
-const userOwnedChannels = new Map(); // userId -> channelId (track who owns which channel)
 
 // Audio file paths
 const SOUNDS_DIR = path.join(__dirname, '..', 'sounds');
@@ -469,52 +468,26 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
             await voiceTimeTracker.handleVoiceStateUpdate(oldState, newState);
         }
 
-        // Check for suspicious channel moves (user moved away from their own channel immediately)
-        if (oldState.channelId && newState.channelId && oldState.channelId !== newState.channelId && !member?.user.bot) {
-            const ownershipKey = `${guildId}-${userId}`;
-            const ownedChannelId = userOwnedChannels.get(ownershipKey);
-            if (ownedChannelId === oldState.channelId) {
-                log(`🚨 SUSPICIOUS: ${member.displayName} was moved away from their own channel ${oldState.channel.name} to ${newState.channel.name}`);
-                
-                // If they were moved to the create channel, move them back to their owned channel
-                if (newState.channel.name === CREATE_CHANNEL_NAME) {
-                    log(`🔄 PROTECTION: Moving ${member.displayName} back to their owned channel`);
-                    try {
-                        setTimeout(async () => {
-                            const ownedChannel = member.guild.channels.cache.get(ownedChannelId);
-                            if (ownedChannel && member.voice.channelId === newState.channelId) {
-                                await member.voice.setChannel(ownedChannel);
-                                log(`✅ Successfully moved ${member.displayName} back to ${ownedChannel.name}`);
-                            }
-                        }, 500);
-                    } catch (error) {
-                        console.error(`❌ Error moving user back to owned channel:`, error);
-                    }
-                }
-            }
-        }
-
         // Dynamic Voice Channel Creation - ONLY PROCESS NON-BOTS
         if (newState.channelId && newState.channel?.name === CREATE_CHANNEL_NAME && !member?.user.bot) {
             
             debugLog(`🎯 User ${member.displayName} joined CREATE channel: ${CREATE_CHANNEL_NAME}`);
             
-            // BULLETPROOF: Check lock BEFORE any async operations
-            const lockKey = `${guildId}-${userId}`;
-            if (recentCreations.has(lockKey)) {
-                log(`🔒 BLOCKED: ${member.displayName} already has active creation (preventing duplicate)`);
+            // Prevent rapid duplicate channel creation by same user
+            if (recentCreations.has(userId)) {
+                debugLog(`🔒 User ${member.displayName} recently created a channel, ignoring duplicate request`);
                 return;
             }
             
-            // Add lock IMMEDIATELY - no delays
-            recentCreations.add(lockKey);
-            log(`🔒 INSTANT LOCK: ${member.displayName} creation locked for 10 seconds`);
+            // Add user to recent creations set
+            recentCreations.add(userId);
+            debugLog(`🔒 Added creation lock for ${member.displayName} (5 second cooldown)`);
             
-            // Remove lock after longer period
+            // Remove from set after 5 seconds
             setTimeout(() => {
-                recentCreations.delete(lockKey);
-                log(`🔓 Released creation lock for ${member.displayName}`);
-            }, 10000); // 10 seconds instead of 5
+                recentCreations.delete(userId);
+                debugLog(`🔓 Removed creation lock for ${member.displayName}`);
+            }, 5000);
             
             const guild = newState.guild;
             
@@ -665,14 +638,6 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
                         if (channelToDelete && channelToDelete.members.size === 0) {
                             await channelToDelete.delete();
                             log(`🗑️ Deleted empty crew: ${oldChannel.name}`);
-                            
-                            // Clean up ownership tracking
-                            for (const [userId, channelId] of userOwnedChannels.entries()) {
-                                if (channelId === oldChannel.id) {
-                                    userOwnedChannels.delete(userId);
-                                    debugLog(`🧹 Removed ownership record for deleted channel ${oldChannel.name}`);
-                                }
-                            }
                         } else {
                             debugLog(`👥 Crew ${oldChannel.name} no longer empty, keeping it`);
                         }
