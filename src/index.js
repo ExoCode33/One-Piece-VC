@@ -25,6 +25,10 @@ const AUDIO_VOLUME = parseFloat(process.env.AUDIO_VOLUME) || 0.4;
 let pool;
 let voiceTimeTracker;
 
+// Prevent duplicate channel creation
+const creationLocks = new Set(); // Track users currently creating channels
+const deletionTimeouts = new Map(); // Track scheduled deletions
+
 async function initializeConnection() {
     // Railway PostgreSQL connection
     if (process.env.DATABASE_URL) {
@@ -360,6 +364,49 @@ async function syncChannelWithCategory(channel, category, creatorId) {
     }
 }
 
+// Safe channel deletion function
+async function safeDeleteChannel(channel, reason = '') {
+    try {
+        // Check if channel still exists and is empty
+        const freshChannel = await channel.guild.channels.fetch(channel.id).catch(() => null);
+        
+        if (!freshChannel) {
+            debugLog(`🗑️ Channel ${channel.name} already deleted, skipping`);
+            return false;
+        }
+        
+        if (freshChannel.members.size > 0) {
+            debugLog(`👥 Channel ${channel.name} no longer empty (${freshChannel.members.size} members), keeping it`);
+            return false;
+        }
+        
+        // Clean up any voice connections for this channel before deletion
+        if (activeConnections.has(channel.id)) {
+            const connection = activeConnections.get(channel.id);
+            try {
+                connection.destroy();
+                activeConnections.delete(channel.id);
+                debugLog(`🔌 Cleaned up voice connection for ${channel.name}`);
+            } catch (connError) {
+                debugLog(`⚠️ Error cleaning connection for ${channel.name}: ${connError.message}`);
+            }
+        }
+        
+        await freshChannel.delete();
+        log(`🗑️ Deleted empty crew: ${channel.name}${reason ? ` (${reason})` : ''}`);
+        return true;
+        
+    } catch (error) {
+        if (error.code === 10003) {
+            debugLog(`🗑️ Channel ${channel.name} already deleted (Unknown Channel error)`);
+            return false;
+        } else {
+            console.error(`❌ Error deleting channel ${channel.name}:`, error.message);
+            return false;
+        }
+    }
+}
+
 // Bot event handlers
 client.once('ready', async () => {
     log(`One Piece Dynamic Voice Bot is ready to set sail!`);
@@ -454,6 +501,7 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
     const userId = newState.id;
     const member = newState.member;
     const guildId = newState.guild.id;
+    const userKey = `${guildId}-${userId}`;
 
     try {
         // Handle voice time tracking
@@ -463,124 +511,135 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
 
         // Dynamic Voice Channel Creation
         if (newState.channelId && newState.channel?.name === CREATE_CHANNEL_NAME) {
-            const guild = newState.guild;
             
-            if (!member.voice.channelId) {
-                debugLog(`User ${member.displayName} no longer in voice, skipping channel creation`);
+            // Prevent duplicate channel creation
+            if (creationLocks.has(userKey)) {
+                debugLog(`🔒 User ${member.displayName} already creating a channel, ignoring duplicate`);
                 return;
             }
             
-            let category;
+            // Add lock to prevent duplicates
+            creationLocks.add(userKey);
             
-            // If CATEGORY_ID is provided, use it directly
-            if (CATEGORY_ID) {
-                category = guild.channels.cache.get(CATEGORY_ID);
-                if (category) {
-                    debugLog(`✅ Using direct category ID: ${CATEGORY_ID} (${category.name})`);
-                    // Save/update this category in database
-                    await updateCategoryForGuild(guildId, category.id, category.name);
-                } else {
-                    console.error(`❌ Category with ID ${CATEGORY_ID} not found! Creating fallback category.`);
-                }
-            }
-            
-            // If no direct category ID or category not found, use saved/default logic
-            if (!category) {
-                // Get saved category or use default
-                let savedCategory = await getCategoryForGuild(guildId);
+            try {
+                const guild = newState.guild;
                 
-                if (savedCategory) {
-                    // Try to find the saved category by ID first
-                    category = guild.channels.cache.get(savedCategory.categoryId);
-                    if (!category) {
-                        // Saved category doesn't exist anymore, find by name
-                        category = guild.channels.cache.find(c => 
-                            c.name === savedCategory.categoryName && c.type === ChannelType.GuildCategory
-                        );
-                        
-                        if (category) {
-                            // Update the database with the new category ID
-                            await updateCategoryForGuild(guildId, category.id, category.name);
-                            log(`🔄 Category ID updated: ${savedCategory.categoryName}`);
-                        }
+                // Double-check user is still in voice
+                if (!member.voice.channelId) {
+                    debugLog(`User ${member.displayName} no longer in voice, skipping channel creation`);
+                    return;
+                }
+                
+                // Additional check: make sure they're still in the create channel
+                if (member.voice.channelId !== newState.channelId) {
+                    debugLog(`User ${member.displayName} moved before channel creation, skipping`);
+                    return;
+                }
+                
+                let category;
+                
+                // If CATEGORY_ID is provided, use it directly
+                if (CATEGORY_ID) {
+                    category = guild.channels.cache.get(CATEGORY_ID);
+                    if (category) {
+                        debugLog(`✅ Using direct category ID: ${CATEGORY_ID} (${category.name})`);
+                        // Save/update this category in database
+                        await updateCategoryForGuild(guildId, category.id, category.name);
+                    } else {
+                        console.error(`❌ Category with ID ${CATEGORY_ID} not found! Creating fallback category.`);
                     }
                 }
                 
+                // If no direct category ID or category not found, use saved/default logic
                 if (!category) {
-                    // Create new category with default name
-                    debugLog(`Category not found, creating new one: ${DEFAULT_CATEGORY_NAME}`);
-                    category = await guild.channels.create({
-                        name: DEFAULT_CATEGORY_NAME,
-                        type: ChannelType.GuildCategory,
-                    });
+                    // Get saved category or use default
+                    let savedCategory = await getCategoryForGuild(guildId);
                     
-                    // Save the new category to database
-                    await updateCategoryForGuild(guildId, category.id, category.name);
-                    log(`📁 Created and saved new category: ${DEFAULT_CATEGORY_NAME}`);
+                    if (savedCategory) {
+                        // Try to find the saved category by ID first
+                        category = guild.channels.cache.get(savedCategory.categoryId);
+                        if (!category) {
+                            // Saved category doesn't exist anymore, find by name
+                            category = guild.channels.cache.find(c => 
+                                c.name === savedCategory.categoryName && c.type === ChannelType.GuildCategory
+                            );
+                            
+                            if (category) {
+                                // Update the database with the new category ID
+                                await updateCategoryForGuild(guildId, category.id, category.name);
+                                log(`🔄 Category ID updated: ${savedCategory.categoryName}`);
+                            }
+                        }
+                    }
+                    
+                    if (!category) {
+                        // Create new category with default name
+                        debugLog(`Category not found, creating new one: ${DEFAULT_CATEGORY_NAME}`);
+                        category = await guild.channels.create({
+                            name: DEFAULT_CATEGORY_NAME,
+                            type: ChannelType.GuildCategory,
+                        });
+                        
+                        // Save the new category to database
+                        await updateCategoryForGuild(guildId, category.id, category.name);
+                        log(`📁 Created and saved new category: ${DEFAULT_CATEGORY_NAME}`);
+                    }
                 }
-            }
 
-            const crewName = getRandomCrewName();
-            
-            // Create the new voice channel with basic setup first
-            const newChannel = await guild.channels.create({
-                name: crewName,
-                type: ChannelType.GuildVoice,
-                parent: category.id,
-            });
+                const crewName = getRandomCrewName();
+                
+                // Create the new voice channel with basic setup first
+                const newChannel = await guild.channels.create({
+                    name: crewName,
+                    type: ChannelType.GuildVoice,
+                    parent: category.id,
+                });
 
-            // Sync permissions with category and add creator permissions
-            await syncChannelWithCategory(newChannel, category, member.id);
+                // Sync permissions with category and add creator permissions
+                await syncChannelWithCategory(newChannel, category, member.id);
 
-            // Ensure channel is in the correct category
-            if (newChannel.parentId !== category.id) {
-                try {
-                    await newChannel.setParent(category.id);
-                    debugLog(`🔧 Manually moved ${crewName} to category ${category.name}`);
-                } catch (moveError) {
-                    console.error(`❌ Error moving channel to category:`, moveError);
+                // Ensure channel is in the correct category
+                if (newChannel.parentId !== category.id) {
+                    try {
+                        await newChannel.setParent(category.id);
+                        debugLog(`🔧 Manually moved ${crewName} to category ${category.name}`);
+                    } catch (moveError) {
+                        console.error(`❌ Error moving channel to category:`, moveError);
+                    }
                 }
-            }
 
-            log(`🚢 Created new crew: ${crewName} for ${member.displayName}`);
-            log(`👑 ${member.displayName} is now captain of ${crewName}`);
+                log(`🚢 Created new crew: ${crewName} for ${member.displayName}`);
+                log(`👑 ${member.displayName} is now captain of ${crewName}`);
 
-            try {
-                if (member.voice.channelId) {
-                    await member.voice.setChannel(newChannel);
-                    debugLog(`✅ Successfully moved ${member.displayName} to ${crewName}`);
-                    
-                    // Play welcome sound immediately after moving user
-                    log(`🎵 Playing welcome sound in ${crewName}...`);
-                    setTimeout(() => {
-                        playWelcomeSound(newChannel);
-                    }, 1500);
-                    
+                // Triple-check user is still in voice before moving
+                const currentMember = await guild.members.fetch(member.id);
+                if (currentMember.voice.channelId) {
+                    try {
+                        await currentMember.voice.setChannel(newChannel);
+                        debugLog(`✅ Successfully moved ${member.displayName} to ${crewName}`);
+                        
+                        // Play welcome sound immediately after moving user
+                        log(`🎵 Playing welcome sound in ${crewName}...`);
+                        setTimeout(() => {
+                            playWelcomeSound(newChannel);
+                        }, 1500);
+                        
+                    } catch (moveError) {
+                        console.error(`❌ Error moving user to new channel:`, moveError);
+                        // Clean up the unused channel
+                        setTimeout(() => safeDeleteChannel(newChannel, 'failed user move'), 1000);
+                    }
                 } else {
                     debugLog(`User ${member.displayName} disconnected before move, cleaning up channel`);
-                    setTimeout(async () => {
-                        try {
-                            if (newChannel.members.size === 0) {
-                                await newChannel.delete();
-                                debugLog(`🗑️ Cleaned up unused crew: ${crewName}`);
-                            }
-                        } catch (cleanupError) {
-                            console.error(`❌ Error cleaning up channel:`, cleanupError);
-                        }
-                    }, 1000);
+                    setTimeout(() => safeDeleteChannel(newChannel, 'user disconnected'), 1000);
                 }
-            } catch (moveError) {
-                console.error(`❌ Error moving user to new channel:`, moveError);
-                setTimeout(async () => {
-                    try {
-                        if (newChannel.members.size === 0) {
-                            await newChannel.delete();
-                            debugLog(`🗑️ Cleaned up failed crew: ${crewName}`);
-                        }
-                    } catch (cleanupError) {
-                        console.error(`❌ Error cleaning up channel:`, cleanupError);
-                    }
-                }, 1000);
+                
+            } finally {
+                // Always remove the creation lock
+                setTimeout(() => {
+                    creationLocks.delete(userKey);
+                    debugLog(`🔓 Removed creation lock for ${member.displayName}`);
+                }, 2000); // Keep lock for 2 seconds to prevent rapid recreations
             }
         }
 
@@ -595,34 +654,31 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
                 oldChannel.parent?.name === categoryName &&
                 oldChannel.members.size === 0) {
                 
-                debugLog(`🕐 Scheduling deletion of empty crew: ${oldChannel.name} in ${DELETE_DELAY}ms`);
+                const channelId = oldChannel.id;
+                const channelName = oldChannel.name;
                 
-                // Clean up any voice connections for this channel
-                if (activeConnections.has(oldChannel.id)) {
-                    const connection = activeConnections.get(oldChannel.id);
-                    connection.destroy();
-                    activeConnections.delete(oldChannel.id);
-                    debugLog(`🔌 Cleaned up voice connection for ${oldChannel.name}`);
+                // Cancel any existing deletion timeout for this channel
+                if (deletionTimeouts.has(channelId)) {
+                    clearTimeout(deletionTimeouts.get(channelId));
+                    deletionTimeouts.delete(channelId);
+                    debugLog(`🔄 Cancelled previous deletion timer for ${channelName}`);
                 }
                 
-                setTimeout(async () => {
-                    try {
-                        const channelToDelete = oldChannel.guild.channels.cache.get(oldChannel.id);
-                        if (channelToDelete && channelToDelete.members.size === 0) {
-                            await channelToDelete.delete();
-                            log(`🗑️ Deleted empty crew: ${oldChannel.name}`);
-                        } else {
-                            debugLog(`👥 Crew ${oldChannel.name} no longer empty, keeping it`);
-                        }
-                    } catch (error) {
-                        console.error(`❌ Error deleting channel ${oldChannel.name}:`, error);
-                    }
+                debugLog(`🕐 Scheduling deletion of empty crew: ${channelName} in ${DELETE_DELAY}ms`);
+                
+                const timeout = setTimeout(async () => {
+                    deletionTimeouts.delete(channelId); // Remove from tracking
+                    await safeDeleteChannel(oldChannel, `empty after ${DELETE_DELAY}ms`);
                 }, DELETE_DELAY);
+                
+                deletionTimeouts.set(channelId, timeout);
             }
         }
 
     } catch (error) {
         console.error('❌ Error in voiceStateUpdate:', error);
+        // Always remove creation lock on error
+        creationLocks.delete(userKey);
     }
 });
 
@@ -644,6 +700,32 @@ client.on('channelUpdate', async (oldChannel, newChannel) => {
         }
     } catch (error) {
         console.error('❌ Error handling category update:', error);
+    }
+});
+
+// Channel deletion handler to clean up our tracking
+client.on('channelDelete', (channel) => {
+    try {
+        // Clean up any pending deletion timeouts
+        if (deletionTimeouts.has(channel.id)) {
+            clearTimeout(deletionTimeouts.get(channel.id));
+            deletionTimeouts.delete(channel.id);
+            debugLog(`🧹 Cleaned up deletion timeout for deleted channel: ${channel.name}`);
+        }
+        
+        // Clean up any active voice connections
+        if (activeConnections.has(channel.id)) {
+            const connection = activeConnections.get(channel.id);
+            try {
+                connection.destroy();
+            } catch (error) {
+                // Ignore errors on cleanup
+            }
+            activeConnections.delete(channel.id);
+            debugLog(`🧹 Cleaned up voice connection for deleted channel: ${channel.name}`);
+        }
+    } catch (error) {
+        debugLog(`⚠️ Error in channelDelete handler: ${error.message}`);
     }
 });
 
@@ -766,6 +848,42 @@ client.on('messageCreate', async (message) => {
             console.error('❌ Error getting voice stats:', error);
             message.reply('❌ Error retrieving voice stats. Please try again later.');
         }
+    }
+
+    // Debug creation locks command
+    if (message.content === '!locks') {
+        if (!message.member.permissions.has(PermissionFlagsBits.ManageChannels)) {
+            return message.reply('❌ You need Manage Channels permission!');
+        }
+        
+        const lockCount = creationLocks.size;
+        const timeoutCount = deletionTimeouts.size;
+        const connectionCount = activeConnections.size;
+        
+        message.reply(`🔒 **Debug Status:**
+**Creation Locks:** ${lockCount}
+**Deletion Timeouts:** ${timeoutCount}
+**Active Connections:** ${connectionCount}
+**Active Voice Sessions:** ${voiceTimeTracker ? voiceTimeTracker.getActiveSessionsCount() : 0}`);
+    }
+
+    // Clear locks command (emergency)
+    if (message.content === '!clearlocks') {
+        if (!message.member.permissions.has(PermissionFlagsBits.Administrator)) {
+            return message.reply('❌ You need Administrator permission!');
+        }
+        
+        const lockCount = creationLocks.size;
+        const timeoutCount = deletionTimeouts.size;
+        
+        creationLocks.clear();
+        deletionTimeouts.forEach(timeout => clearTimeout(timeout));
+        deletionTimeouts.clear();
+        
+        message.reply(`🧹 **Cleared debug state:**
+**Removed ${lockCount} creation locks**
+**Cancelled ${timeoutCount} deletion timeouts**
+**✅ Bot state reset**`);
     }
 
     // Test voice logging command
@@ -919,6 +1037,8 @@ client.on('messageCreate', async (message) => {
 \`!checksound\` - Check if sound file exists and show details
 
 **🔧 Debug Commands:**
+\`!locks\` - Show creation locks and timeouts (Manage Channels required)
+\`!clearlocks\` - Clear all locks and timeouts (Administrator required)
 \`!testlog\` - Test voice logging channel (Manage Channels required)
 \`!debuglog\` - Show voice logging debug info (Manage Channels required)
 \`!forcelog\` - Force send a test voice event (Manage Channels required)
@@ -932,14 +1052,12 @@ client.on('messageCreate', async (message) => {
 5. Empty crews are automatically deleted after ${DELETE_DELAY/1000} seconds
 6. Voice time is automatically tracked!
 
-**🎯 Features:**
-• Dynamic voice channel creation with One Piece themed names
-• **Simplified voice time tracking (total time only)**
-• **Real-time Discord channel logging of voice events**
-• Captain permissions for channel creators
-• Automatic cleanup of empty channels
-• Welcome sounds with The Going Merry theme
-• **Slash commands for better user experience**
+**🎯 Key Fixes:**
+• **Duplicate channel creation prevention** - Uses creation locks
+• **Safe channel deletion** - Handles "Unknown Channel" errors
+• **Race condition protection** - Triple-checks user state
+• **Memory leak prevention** - Cleans up timeouts and connections
+• **Better error handling** - Graceful fallbacks for all operations
 
 **💡 Use slash commands (/) for the best experience!**
 **🔍 Voice events are logged to your designated channel with rich embeds!**`);
@@ -971,6 +1089,13 @@ async function gracefulShutdown() {
     log('🛑 Shutting down bot gracefully...');
     
     try {
+        // Clear all creation locks
+        creationLocks.clear();
+        
+        // Cancel all deletion timeouts
+        deletionTimeouts.forEach(timeout => clearTimeout(timeout));
+        deletionTimeouts.clear();
+        
         // End all active voice sessions
         if (voiceTimeTracker) {
             await voiceTimeTracker.endAllSessions();
@@ -1009,7 +1134,7 @@ async function gracefulShutdown() {
 setInterval(() => {
     if (DEBUG) {
         const activeSessions = voiceTimeTracker ? voiceTimeTracker.getActiveSessionsCount() : 0;
-        console.log(`🏴‍☠️ Bot Status - Guilds: ${client.guilds.cache.size}, Active Voice Sessions: ${activeSessions}, Audio Connections: ${activeConnections.size}, Uptime: ${Math.floor(process.uptime()/60)}m`);
+        console.log(`🏴‍☠️ Bot Status - Guilds: ${client.guilds.cache.size}, Active Voice Sessions: ${activeSessions}, Audio Connections: ${activeConnections.size}, Creation Locks: ${creationLocks.size}, Deletion Timeouts: ${deletionTimeouts.size}, Uptime: ${Math.floor(process.uptime()/60)}m`);
     }
 }, 300000); // Log every 5 minutes in debug mode
 
