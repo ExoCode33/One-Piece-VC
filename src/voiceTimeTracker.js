@@ -150,11 +150,12 @@ class VoiceTimeTracker {
 
     async getTopVoiceUsers(guildId, limit = 10) {
         try {
+            // FIXED: Always get fresh data from database with proper ordering
             const result = await this.pool.query(`
                 SELECT user_id, username, total_seconds, last_updated
                 FROM user_voice_time
-                WHERE guild_id = $1
-                ORDER BY total_seconds DESC
+                WHERE guild_id = $1 AND total_seconds > 0
+                ORDER BY total_seconds DESC, last_updated DESC
                 LIMIT $2
             `, [guildId, limit]);
             
@@ -162,6 +163,21 @@ class VoiceTimeTracker {
         } catch (error) {
             console.error('❌ Error getting top voice users:', error);
             return [];
+        }
+    }
+
+    // NEW: Method to update username in database
+    async updateUsername(userId, guildId, newUsername) {
+        try {
+            await this.pool.query(`
+                UPDATE user_voice_time 
+                SET username = $1, last_updated = CURRENT_TIMESTAMP 
+                WHERE user_id = $2 AND guild_id = $3
+            `, [newUsername, userId, guildId]);
+            
+            console.log(`📝 Updated username for ${userId}: ${newUsername}`);
+        } catch (error) {
+            console.error('❌ Error updating username:', error);
         }
     }
 
