@@ -457,49 +457,19 @@ client.once('ready', async () => {
     }
 });
 
-// Voice state update handler with proper event deduplication
+// Voice state update handler with detailed debugging
 client.on('voiceStateUpdate', async (oldState, newState) => {
-    // Skip all bot voice state changes 
-    if (newState.member?.user.bot || oldState.member?.user.bot) {
-        debugLog(`🤖 Ignoring bot voice state change: ${newState.member?.user.username || oldState.member?.user.username}`);
+    const userId = newState.id || oldState.id;
+    const member = newState.member || oldState.member;
+    const guildId = (newState.guild || oldState.guild).id;
+    
+    // Log EVERY voice state change for debugging
+    console.log(`🔍 RAW EVENT: ${member.displayName} | Old: ${oldState.channelId ? oldState.channel.name : 'none'} | New: ${newState.channelId ? newState.channel.name : 'none'} | Bot: ${member.user.bot}`);
+
+    // Skip bot events (but still log them above)
+    if (member.user.bot) {
         return;
     }
-
-    const userId = newState.id;
-    const member = newState.member;
-    const guildId = newState.guild.id;
-
-    // CRITICAL: Create a unique event signature to prevent duplicate processing
-    const eventSignature = `${guildId}-${userId}-${oldState.channelId || 'null'}-${newState.channelId || 'null'}-${Date.now()}`;
-    
-    // Store recent event signatures to detect duplicates within 1 second
-    if (!client.recentEvents) client.recentEvents = new Set();
-    
-    // Check for duplicate events within 1000ms
-    const similarEvent = Array.from(client.recentEvents).find(sig => {
-        const [sigGuild, sigUser, sigOld, sigNew, sigTime] = sig.split('-');
-        const timeDiff = Date.now() - parseInt(sigTime);
-        return sigGuild === guildId && 
-               sigUser === userId && 
-               sigOld === (oldState.channelId || 'null') && 
-               sigNew === (newState.channelId || 'null') && 
-               timeDiff < 1000; // Within 1 second
-    });
-
-    if (similarEvent) {
-        debugLog(`🚫 DUPLICATE EVENT: Ignoring duplicate voiceStateUpdate for ${member.displayName}`);
-        return;
-    }
-
-    // Store this event signature
-    client.recentEvents.add(eventSignature);
-    
-    // Clean up old event signatures (older than 5 seconds)
-    setTimeout(() => {
-        client.recentEvents.delete(eventSignature);
-    }, 5000);
-
-    debugLog(`✅ PROCESSING: voiceStateUpdate for ${member.displayName} (${oldState.channel?.name || 'null'} → ${newState.channel?.name || 'null'})`);
 
     try {
         // Handle voice time tracking
@@ -507,10 +477,9 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
             await voiceTimeTracker.handleVoiceStateUpdate(oldState, newState);
         }
 
-        // Dynamic Voice Channel Creation - ONLY PROCESS NON-BOTS
-        if (newState.channelId && newState.channel?.name === CREATE_CHANNEL_NAME) {
-            
-            log(`🎯 VALID EVENT: ${member.displayName} joined CREATE channel: ${CREATE_CHANNEL_NAME}`);
+        // SIMPLE: User joined the create channel
+        if (!oldState.channelId && newState.channelId && newState.channel?.name === CREATE_CHANNEL_NAME) {
+            console.log(`🎯 USER JOINED CREATE CHANNEL: ${member.displayName} joined ${CREATE_CHANNEL_NAME}`);
             
             const guild = newState.guild;
             
