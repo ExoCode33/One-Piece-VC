@@ -111,8 +111,9 @@ const client = new Client({
     ]
 });
 
-// Track audio connections
+// Track audio connections and prevent duplicate channel creation
 const activeConnections = new Map(); // channelId -> voice connection
+const recentCreations = new Set(); // userId -> prevent rapid channel creation
 
 // Audio file paths
 const SOUNDS_DIR = path.join(__dirname, '..', 'sounds');
@@ -194,6 +195,12 @@ async function updateCategoryForGuild(guildId, categoryId, categoryName) {
 // Function to play welcome sound in a voice channel
 async function playWelcomeSound(channel) {
     try {
+        // SAFETY CHECK: Never join the "Set Sail Together" channel
+        if (channel.name === CREATE_CHANNEL_NAME) {
+            console.error(`🚨 SAFETY: Bot attempted to join create channel "${CREATE_CHANNEL_NAME}" - BLOCKED!`);
+            return;
+        }
+        
         if (!fs.existsSync(WELCOME_SOUND)) {
             debugLog(`❌ Welcome sound file not found: ${WELCOME_SOUND}`);
             log(`⚠️ Create a 'sounds' folder and add 'The Going Merry One Piece.ogg' file`);
@@ -463,6 +470,25 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
 
         // Dynamic Voice Channel Creation - ONLY PROCESS NON-BOTS
         if (newState.channelId && newState.channel?.name === CREATE_CHANNEL_NAME && !member?.user.bot) {
+            
+            debugLog(`🎯 User ${member.displayName} joined CREATE channel: ${CREATE_CHANNEL_NAME}`);
+            
+            // Prevent rapid duplicate channel creation by same user
+            if (recentCreations.has(userId)) {
+                debugLog(`🔒 User ${member.displayName} recently created a channel, ignoring duplicate request`);
+                return;
+            }
+            
+            // Add user to recent creations set
+            recentCreations.add(userId);
+            debugLog(`🔒 Added creation lock for ${member.displayName} (5 second cooldown)`);
+            
+            // Remove from set after 5 seconds
+            setTimeout(() => {
+                recentCreations.delete(userId);
+                debugLog(`🔓 Removed creation lock for ${member.displayName}`);
+            }, 5000);
+            
             const guild = newState.guild;
             
             if (!member.voice.channelId) {
@@ -553,6 +579,7 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
                     // Play welcome sound immediately after moving user
                     log(`🎵 Playing welcome sound in ${crewName}...`);
                     setTimeout(() => {
+                        // Make sure to join the NEW channel, not the create channel
                         playWelcomeSound(newChannel);
                     }, 1500);
                     
@@ -768,7 +795,38 @@ client.on('messageCreate', async (message) => {
         }
     }
 
-    // Test voice logging command
+    // Debug creation locks command
+    if (message.content === '!locks') {
+        if (!message.member.permissions.has(PermissionFlagsBits.ManageChannels)) {
+            return message.reply('❌ You need Manage Channels permission!');
+        }
+        
+        const lockCount = recentCreations.size;
+        const connectionCount = activeConnections.size;
+        const lockedUsers = Array.from(recentCreations).map(id => {
+            const member = message.guild.members.cache.get(id);
+            return member ? member.displayName : id;
+        }).join(', ');
+        
+        message.reply(`🔒 **Debug Status:**
+**Creation Locks:** ${lockCount} ${lockedUsers ? `(${lockedUsers})` : ''}
+**Active Connections:** ${connectionCount}
+**Active Voice Sessions:** ${voiceTimeTracker ? voiceTimeTracker.getActiveSessionsCount() : 0}`);
+    }
+
+    // Clear locks command (emergency)
+    if (message.content === '!clearlocks') {
+        if (!message.member.permissions.has(PermissionFlagsBits.Administrator)) {
+            return message.reply('❌ You need Administrator permission!');
+        }
+        
+        const lockCount = recentCreations.size;
+        recentCreations.clear();
+        
+        message.reply(`🧹 **Cleared debug state:**
+**Removed ${lockCount} creation locks**
+**✅ Bot state reset**`);
+    }
     if (message.content === '!testlog') {
         if (!message.member.permissions.has(PermissionFlagsBits.ManageChannels)) {
             return message.reply('❌ You need Manage Channels permission to test logging!');
