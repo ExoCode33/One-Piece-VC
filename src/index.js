@@ -147,8 +147,8 @@ function hasAdminPermissions(member) {
         return true;
     }
     
-    // Check if user has the specific admin role (if configured)
-    if (ADMIN_ROLE_ID && member.roles.cache.has(ADMIN_ROLE_ID)) {
+    // Check if user has the specific admin role (if configured and not empty)
+    if (ADMIN_ROLE_ID && ADMIN_ROLE_ID.trim() !== '' && member.roles.cache.has(ADMIN_ROLE_ID)) {
         return true;
     }
     
