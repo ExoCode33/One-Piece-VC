@@ -1,14 +1,16 @@
-// index.js
-// Discord.js v14 dynamic voice channel manager (duplicate-proof)
-// --------------------------------------------------------------
+// src/index.js
+// Discord.js v14 dynamic voice channel manager (duplicate-proof) + welcome sound join
+// -----------------------------------------------------------------------------------
 
 require('dotenv').config();
+const path = require('node:path');
+const fs = require('node:fs');
+
 const {
   Client,
   GatewayIntentBits,
   Partials,
   ChannelType,
-  PermissionsBitField,
   EmbedBuilder,
 } = require('discord.js');
 
@@ -18,20 +20,24 @@ const {
   createAudioResource,
   AudioPlayerStatus,
   NoSubscriberBehavior,
-  getVoiceConnection,
 } = require('@discordjs/voice');
 
 // ====== ENV ======
 const TOKEN = process.env.DISCORD_TOKEN;
-const CREATE_CHANNEL_ID = process.env.CREATE_CHANNEL_ID; // REQUIRED: "🏴〢Set Sail Together"
-const VOICE_CATEGORY_ID = process.env.VOICE_CATEGORY_ID || null; // optional; will fall back to the create channel's parent
-const LOG_CHANNEL_ID = process.env.LOG_CHANNEL_ID || null; // optional log channel
-const WELCOME_SOUND_PATH = process.env.WELCOME_SOUND_PATH || null;
+if (!TOKEN) throw new Error('Missing DISCORD_TOKEN');
+
+const CREATE_CHANNEL_ID = process.env.CREATE_CHANNEL_ID || null; // optional (we can resolve by name)
+const CREATE_CHANNEL_NAME = process.env.CREATE_CHANNEL_NAME || '🏴〢Set Sail Together';
+const VOICE_CATEGORY_ID = process.env.VOICE_CATEGORY_ID || null;
+const LOG_CHANNEL_ID = process.env.LOG_CHANNEL_ID || null;
+
+const WELCOME_SOUND_PATH =
+  process.env.WELCOME_SOUND_PATH || path.resolve(__dirname, 'assets/welcome.mp3');
+const WELCOME_COOLDOWN_MS = Number(process.env.WELCOME_COOLDOWN_MS || 10000);
+const STAY_AFTER_WELCOME = String(process.env.STAY_AFTER_WELCOME || 'false').toLowerCase() === 'true';
+
 const DELETE_DELAY = Number(process.env.DELETE_DELAY_MS || 1500);
 const DEBUG = String(process.env.DEBUG_VC || 'true').toLowerCase() !== 'false';
-
-if (!TOKEN) throw new Error('Missing DISCORD_TOKEN');
-if (!CREATE_CHANNEL_ID) throw new Error('Missing CREATE_CHANNEL_ID');
 
 // ====== CLIENT ======
 const client = new Client({
@@ -44,23 +50,18 @@ const client = new Client({
 });
 
 // ====== STATE ======
-// Prevent concurrent "create" work per user
-const creatingForUser = new Set();              // userId -> boolean
-// Cache user's active crew VC
-const userCrew = new Map();                     // userId -> channelId
-// One delete timer per channel
-const deleteTimers = new Map();                 // channelId -> Timeout
-// Track audio connections by channel (for welcome sound cleanup)
-const activeConnections = new Map();            // channelId -> voice connection
+const creatingForUser = new Set();        // userId -> boolean (guard duplicate create)
+const userCrew = new Map();               // userId -> channelId
+const deleteTimers = new Map();           // channelId -> Timeout
+const activeConnections = new Map();      // channelId -> voice connection
+const welcomeCooldown = new Map();        // channelId -> lastPlayTs
+let CREATE_ID_CACHE = null;               // resolved create channel id
 
 // ====== LOGGING HELPERS ======
-function log(msg) {
-  console.log(msg);
-}
-function debugLog(msg) {
-  if (DEBUG) console.log('[DEBUG]', msg);
-}
+function log(msg) { console.log(msg); }
+function debugLog(msg) { if (DEBUG) console.log('[DEBUG]', msg); }
 
+// ====== LOG EMBEDS ======
 async function sendVoiceLog(guild, type, member, channel) {
   try {
     if (!LOG_CHANNEL_ID) return;
@@ -88,10 +89,27 @@ async function sendVoiceLog(guild, type, member, channel) {
   }
 }
 
-// ====== CATEGORY RESOLUTION ======
+// ====== RESOLVERS ======
+async function getCreateChannelId(guild) {
+  if (CREATE_CHANNEL_ID) return CREATE_CHANNEL_ID;  // env wins
+  if (CREATE_ID_CACHE) return CREATE_ID_CACHE;
+
+  const ch = guild.channels.cache.find(
+    c => c.type === ChannelType.GuildVoice && c.name === CREATE_CHANNEL_NAME
+  );
+  if (!ch) {
+    throw new Error(
+      `Could not resolve the create channel. Set CREATE_CHANNEL_ID or create a voice channel named "${CREATE_CHANNEL_NAME}".`
+    );
+  }
+  CREATE_ID_CACHE = ch.id;
+  return ch.id;
+}
+
 async function resolveVoiceCategoryId(guild) {
   if (VOICE_CATEGORY_ID) return VOICE_CATEGORY_ID;
-  const createCh = guild.channels.cache.get(CREATE_CHANNEL_ID);
+  const resolvedCreateId = await getCreateChannelId(guild);
+  const createCh = guild.channels.cache.get(resolvedCreateId);
   if (createCh && createCh.parentId) {
     debugLog(`✅ Using parent category of create channel: ${createCh.parentId}`);
     return createCh.parentId;
@@ -100,15 +118,28 @@ async function resolveVoiceCategoryId(guild) {
 }
 
 // ====== WELCOME SOUND ======
+function shouldPlayWelcome(channelId) {
+  const last = welcomeCooldown.get(channelId) || 0;
+  if (Date.now() - last < WELCOME_COOLDOWN_MS) return false;
+  welcomeCooldown.set(channelId, Date.now());
+  return true;
+}
+
 async function playWelcomeIfConfigured(channel) {
   try {
-    if (!WELCOME_SOUND_PATH) return;
     if (!channel || channel.type !== ChannelType.GuildVoice) return;
+    if (!WELCOME_SOUND_PATH || !fs.existsSync(WELCOME_SOUND_PATH)) {
+      debugLog(`🎵 Skipping welcome: file missing at ${WELCOME_SOUND_PATH}`);
+      return;
+    }
+    if (!shouldPlayWelcome(channel.id)) {
+      debugLog(`🎵 Welcome on cooldown for ${channel.name}`);
+      return;
+    }
 
     // Avoid stacking multiple connections
     if (activeConnections.has(channel.id)) {
-      const existing = activeConnections.get(channel.id);
-      try { existing.destroy(); } catch {}
+      try { activeConnections.get(channel.id).destroy(); } catch {}
       activeConnections.delete(channel.id);
     }
 
@@ -126,19 +157,28 @@ async function playWelcomeIfConfigured(channel) {
 
     connection.subscribe(player);
     player.play(resource);
+    debugLog(`🎵 Playing welcome sound in ${channel.name}...`);
 
     player.once(AudioPlayerStatus.Idle, () => {
-      try {
-        connection.destroy();
-      } catch {}
-      activeConnections.delete(channel.id);
-      debugLog(`🎵 Welcome sound finished, left ${channel.name}`);
+      if (!STAY_AFTER_WELCOME) {
+        try { connection.destroy(); } catch {}
+        activeConnections.delete(channel.id);
+        debugLog(`🎵 Welcome finished, left ${channel.name}`);
+      } else {
+        debugLog(`🎵 Welcome finished, staying in ${channel.name} (STAY_AFTER_WELCOME=true)`);
+      }
     });
 
-    debugLog(`🎵 Playing welcome sound in ${channel.name}...`);
   } catch (e) {
     console.error('Welcome sound error:', e);
   }
+}
+
+// ====== CREW NAME (customize if desired) ======
+function getCrewName(/* member */) {
+  // Keep deterministic; do not base on event channel names.
+  // You can make this per-user if you like.
+  return '🎭 Sabaody Archipelago';
 }
 
 // ====== CREATE HANDLER (find-or-create, user-locked) ======
@@ -162,14 +202,14 @@ async function handleCreateRequest(guild, member) {
           await member.voice.setChannel(cached, 'Reusing existing crew VC (cached)');
           await sendVoiceLog(guild, 'MOVE', member, cached);
         }
+        await playWelcomeIfConfigured(cached);
         return;
-      } else {
-        userCrew.delete(member.id);
       }
+      userCrew.delete(member.id);
     }
 
     // 2) Try to find existing by deterministic name
-    const crewName = getCrewName(member); // customize if you use per-user naming
+    const crewName = getCrewName(member);
     let existing = guild.channels.cache.find(
       c =>
         c &&
@@ -185,6 +225,7 @@ async function handleCreateRequest(guild, member) {
         await member.voice.setChannel(existing, 'Reusing existing crew VC (found)');
         await sendVoiceLog(guild, 'MOVE', member, existing);
       }
+      await playWelcomeIfConfigured(existing);
       return;
     }
 
@@ -217,36 +258,27 @@ async function handleCreateRequest(guild, member) {
     log(`🚢 Created new crew: ${channel.name} for ${member.displayName}`);
     await sendVoiceLog(guild, 'JOIN', member, channel);
 
-    // 4) Move the member in (guard against duplicate move)
+    // Move the member in
     if (member.voice?.channelId !== channel.id) {
       await member.voice.setChannel(channel, 'Move into newly created crew VC.');
       await sendVoiceLog(guild, 'MOVE', member, channel);
     }
 
-    // 5) Optional welcome sound
     await playWelcomeIfConfigured(channel);
   } catch (err) {
     console.error('❌ handleCreateRequest error:', err);
   } finally {
-    // swallow follow-up events caused by move/audio
+    // swallow follow-up events triggered by move/audio
     setTimeout(() => creatingForUser.delete(member.id), 3000);
   }
 }
 
-// Deterministic naming – customize if you want per-user names.
-// If you prefer one static theme (like Sabaody), keep it constant.
-// If you rotate per-user: return `${emoji} ${someNameFor(member)}`
-function getCrewName(member) {
-  // Example: fixed theme
-  return '🎭 Sabaody Archipelago';
-}
-
 // ====== DELETE SCHEDULER (single-shot, safe 404 handling) ======
-function scheduleDeleteIfEmpty(oldChannel) {
+function scheduleDeleteIfEmpty(oldChannel, createId) {
   if (!oldChannel) return;
   if (oldChannel.type !== ChannelType.GuildVoice) return;
   if (oldChannel.members.size !== 0) return;
-  if (String(oldChannel.id) === String(CREATE_CHANNEL_ID)) return;
+  if (String(oldChannel.id) === String(createId)) return;
 
   if (deleteTimers.has(oldChannel.id)) {
     debugLog(`⏱️ Deletion already scheduled for ${oldChannel.name}, skipping duplicate.`);
@@ -255,11 +287,9 @@ function scheduleDeleteIfEmpty(oldChannel) {
 
   debugLog(`🕐 Scheduling deletion of empty crew: ${oldChannel.name} in ${DELETE_DELAY}ms`);
 
-  // Clean up any voice connections for this channel (e.g., welcome sound)
+  // Clean up welcome connection if any
   if (activeConnections.has(oldChannel.id)) {
-    try {
-      activeConnections.get(oldChannel.id).destroy();
-    } catch {}
+    try { activeConnections.get(oldChannel.id).destroy(); } catch {}
     activeConnections.delete(oldChannel.id);
     debugLog(`🔌 Cleaned up voice connection for ${oldChannel.name}`);
   }
@@ -282,7 +312,6 @@ function scheduleDeleteIfEmpty(oldChannel) {
       }
     } finally {
       deleteTimers.delete(oldChannel.id);
-      // cleanup userCrew mapping if we tracked this channel
       for (const [uid, cid] of userCrew) {
         if (cid === oldChannel.id) userCrew.delete(uid);
       }
@@ -306,6 +335,8 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
     const oldChannel = oldState.channel;
     const newChannel = newState.channel;
 
+    const createId = await getCreateChannelId(guild);
+
     // If someone joined a channel that had a delete pending, cancel that delete.
     if (newState.channelId && deleteTimers.has(newState.channelId)) {
       clearTimeout(deleteTimers.get(newState.channelId));
@@ -314,7 +345,7 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
     }
 
     // JOIN create channel → create/move
-    if (newState.channelId && String(newState.channelId) === String(CREATE_CHANNEL_ID)) {
+    if (newState.channelId && String(newState.channelId) === String(createId)) {
       debugLog(`🎯 ${member.displayName} joined CREATE channel → handleCreateRequest()`);
       await handleCreateRequest(guild, member);
       return;
@@ -329,9 +360,14 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
       await sendVoiceLog(guild, 'LEAVE', member, oldChannel);
     }
 
+    // If the user just landed in their crew VC, play welcome (cooldown-protected)
+    if (newChannel && userCrew.get(member.id) === newChannel.id) {
+      await playWelcomeIfConfigured(newChannel);
+    }
+
     // If the old channel became empty, schedule deletion
     if (oldChannel && oldChannel.members.size === 0) {
-      scheduleDeleteIfEmpty(oldChannel);
+      scheduleDeleteIfEmpty(oldChannel, createId);
     }
   } catch (e) {
     console.error('voiceStateUpdate error:', e);
